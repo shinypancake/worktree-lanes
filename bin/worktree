@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # worktree — per-worktree/lane dev+test isolation CLI.
+# shellcheck disable=SC1091  # sourced lib files are located at runtime via WTL_ROOT
 set -euo pipefail
 
 # Resolve the install root (follow symlinks; Homebrew symlinks bin/worktree).
