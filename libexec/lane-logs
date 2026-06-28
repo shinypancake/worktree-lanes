@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+eval "$(worktree env --shell)"
+COMPOSE_PROJECT_NAME="$WTL_COMPOSE_PROJECT"
+exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" logs -f "$@"

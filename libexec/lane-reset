@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+worktree lane-down >/dev/null 2>&1 || true
+exec worktree lane-up "$@"

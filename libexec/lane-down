@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+eval "$(worktree env --shell)"
+COMPOSE_PROJECT_NAME="$WTL_COMPOSE_PROJECT"
+
+if docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" down -v --remove-orphans "$@"; then
+  exit 0
+fi
+
+echo "WARN: compose down failed for $COMPOSE_PROJECT_NAME" >&2
+if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+  echo "Trying CI janitor fallback for project $COMPOSE_PROJECT_NAME..." >&2
+  worktree runner-clean-ci --apply --include-running --project="$COMPOSE_PROJECT_NAME" >&2 || true
+fi
+
+# Recheck whether the project still exists; if not, treat cleanup as successful.
+if ! docker ps -a --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" -q | grep -q . &&
+   ! docker network ls --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" -q | grep -q . &&
+   ! docker volume ls --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" -q | grep -q .; then
+  exit 0
+fi
+
+exit 1

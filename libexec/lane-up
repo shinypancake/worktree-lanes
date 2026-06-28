@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# Starts an isolated compose lane for the current worktree (backend/frontend/postgres/redis/mailhog/sidekiq optional).
+
+set -euo pipefail
+
+WITH_SIDEKIQ=1
+DETACH=0
+BUILD_MODE=""
+for arg in "$@"; do
+  case "$arg" in
+    --no-sidekiq) WITH_SIDEKIQ=0 ;;
+    -d|--detach) DETACH=1 ;;
+    --build) BUILD_MODE="--build" ;;
+    --no-build) BUILD_MODE="--no-build" ;;
+  esac
+done
+
+eval "$(worktree env --shell --infra-mode=isolated)"
+COMPOSE_PROJECT_NAME="$WTL_COMPOSE_PROJECT"
+if ! docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q | grep -q .; then
+  worktree env --check-ports --infra-mode=isolated >/dev/null
+fi
+
+# Rebuild a persistent local lane's image when Gemfile.lock changed. Skipped in
+# CI, where lanes build the image fresh (via --build or compose auto-build).
+if [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+  worktree sync-gems
+fi
+
+run_compose_up_detached() {
+  if [ "${GITHUB_ACTIONS:-}" = "true" ] && command -v flock >/dev/null 2>&1; then
+    # Prevent a check-then-bind race between concurrent CI lane startups on the same host.
+    local lock_file="/tmp/${WTL_PROJECT}-ci-lane-start.lock"
+    exec 9>"$lock_file"
+    flock 9
+    # Re-check ports inside the lock if this project is not already up.
+    if ! docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q | grep -q .; then
+      worktree env --check-ports --infra-mode=isolated >/dev/null
+    fi
+    docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d ${BUILD_MODE:+$BUILD_MODE} "$@"
+    flock -u 9
+    exec 9>&-
+  else
+    docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d ${BUILD_MODE:+$BUILD_MODE} "$@"
+  fi
+}
+
+services=(postgres redis mailhog backend frontend)
+
+echo "Compose project: $COMPOSE_PROJECT_NAME"
+echo "Frontend: $WTL_FRONTEND_URL"
+echo "API:      $WTL_API_BASE_URL"
+echo "MailHog:  http://localhost:$WTL_MAILHOG_UI_PORT"
+
+if [ "$DETACH" -eq 1 ]; then
+  run_compose_up_detached "${services[@]}"
+  if [ "$WITH_SIDEKIQ" -eq 1 ]; then
+    run_compose_up_detached sidekiq
+  fi
+  # Wait for HTTP endpoints used by E2E.
+  targets=(
+    "$WTL_FRONTEND_URL"
+    "$WTL_API_BASE_URL/csrf_token"
+    "$WTL_MAILHOG_API_URL/v2/messages"
+  )
+  # CI preview mode serves a built SPA; verify deep-link fallback works or E2E will 404 on /login.
+  if [ "${WTL_FRONTEND_RUN_MODE:-dev}" = "preview" ]; then
+    targets+=("$WTL_FRONTEND_URL/login")
+  fi
+  for target in "${targets[@]}"; do
+    echo "Waiting for $target ..."
+    ready=0
+    max_attempts=60
+    if [ "$target" = "$WTL_FRONTEND_URL" ] && [ "${WTL_FRONTEND_RUN_MODE:-dev}" = "preview" ]; then
+      # Preview mode performs a Vite production build on startup; allow extra warmup time in CI.
+      max_attempts=180
+    fi
+    if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ "$target" != "$WTL_FRONTEND_URL" ]; then
+      # Under heavy nightly load, backend/mailhog can take longer to accept
+      # requests even after containers are created.
+      max_attempts=120
+    fi
+    for attempt in $(seq 1 "$max_attempts"); do
+      # Keep readiness checks bounded; a half-open HTTP connection can otherwise hang curl indefinitely.
+      if command -v curl >/dev/null 2>&1 && curl -fsS --connect-timeout 1 --max-time 2 "$target" >/dev/null 2>&1; then
+        echo "Ready: $target"
+        ready=1
+        break
+      fi
+      if [ $((attempt % 5)) -eq 0 ]; then
+        echo "Still waiting for $target ($attempt/$max_attempts)"
+      fi
+      sleep 1
+    done
+    if [ "$ready" -ne 1 ]; then
+      echo "Timed out waiting for $target" >&2
+      if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+        echo "Compose status after readiness timeout:" >&2
+        docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps >&2 || true
+        case "$target" in
+          "$WTL_FRONTEND_URL"|"$WTL_FRONTEND_URL/login")
+            echo "Recent frontend logs:" >&2
+            docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" logs --tail=80 frontend >&2 || true
+            ;;
+          "$WTL_API_BASE_URL/csrf_token")
+            echo "Recent backend logs:" >&2
+            docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" logs --tail=80 backend >&2 || true
+            ;;
+          "$WTL_MAILHOG_API_URL/v2/messages")
+            echo "Recent mailhog logs:" >&2
+            docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" logs --tail=80 mailhog >&2 || true
+            ;;
+        esac
+      fi
+      exit 1
+    fi
+  done
+else
+  if [ "$WITH_SIDEKIQ" -eq 1 ]; then
+    exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up ${BUILD_MODE:+$BUILD_MODE} "${services[@]}" sidekiq
+  fi
+  exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up ${BUILD_MODE:+$BUILD_MODE} "${services[@]}"
+fi
