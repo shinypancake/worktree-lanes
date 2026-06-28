@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Wrapper for running backend tests from any worktree.
+# Uses a per-worktree test database and redis DB so tests can run in parallel.
+
+set -euo pipefail
+
+eval "$(worktree env --shell)"
+# COMPOSE_PROJECT_NAME and COMPOSE_FILE are set directly by worktree env --shell
+BASE_CI_LANE_SUFFIX="${WTL_CI_LANE_SUFFIX:-}"
+CI_INFRA_STARTUP_ATTEMPTS=0
+CI_INFRA_STARTUP_MAX_ATTEMPTS=3
+CI_INFRA_JANITOR_RAN=0
+
+cleanup_compose_on_exit() {
+  if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ "${WTL_INFRA_MODE:-isolated}" != "shared" ]; then
+    worktree lane-down >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_compose_on_exit EXIT INT TERM
+
+compose_up_isolated_with_retry() {
+  while [ "$CI_INFRA_STARTUP_ATTEMPTS" -lt "$CI_INFRA_STARTUP_MAX_ATTEMPTS" ]; do
+    if [ "$CI_INFRA_STARTUP_ATTEMPTS" -gt 0 ] && [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+      retry_suffix="${BASE_CI_LANE_SUFFIX:-backend-test}-r${CI_INFRA_STARTUP_ATTEMPTS}"
+      export WTL_CI_LANE_SUFFIX="$retry_suffix"
+      eval "$(worktree env --shell)"
+      echo "Retrying backend test infra startup with CI lane suffix: $WTL_CI_LANE_SUFFIX" >&2
+    fi
+
+    local up_log
+    up_log="$(mktemp)"
+    if docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d postgres redis >"$up_log" 2>&1; then
+      rm -f "$up_log"
+      return 0
+    fi
+
+    if [ "${GITHUB_ACTIONS:-}" = "true" ] && \
+      grep -Eqi 'port is already allocated|failed to bind host port|Port in use:|predefined address pools have been fully subnetted|missing dependency [a-z0-9_-]+|dependency [a-z0-9_-]+ failed to start|container [^ ]+ exited \(0\)|No such container:' "$up_log"; then
+      local subnet_exhausted=0
+      grep -Eqi 'predefined address pools have been fully subnetted' "$up_log" && subnet_exhausted=1
+      echo "CI backend test infra startup hit a Docker/Compose startup error (network/dependency) (attempt $((CI_INFRA_STARTUP_ATTEMPTS + 1))/$CI_INFRA_STARTUP_MAX_ATTEMPTS)." >&2
+      sed -n '1,120p' "$up_log" >&2 || true
+      docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1 || true
+      if [ "$subnet_exhausted" -eq 1 ] && [ "$CI_INFRA_JANITOR_RAN" -eq 0 ]; then
+        echo "Running CI compose janitor before retry to free leaked Docker networks..." >&2
+        worktree runner-clean-ci --apply --max-age=120 >&2 || true
+        CI_INFRA_JANITOR_RAN=1
+      fi
+      rm -f "$up_log"
+      CI_INFRA_STARTUP_ATTEMPTS=$((CI_INFRA_STARTUP_ATTEMPTS + 1))
+      continue
+    fi
+
+    cat "$up_log" >&2 || true
+    rm -f "$up_log"
+    return 1
+  done
+
+  echo "Failed to start backend test infra after $CI_INFRA_STARTUP_MAX_ATTEMPTS attempts." >&2
+  return 1
+}
+
+run_rspec() {
+  local docker_run_env_flags=()
+  if [ "$WTL_INFRA_MODE" = "shared" ]; then
+    if [ "${WTL_DRYRUN:-0}" != "1" ]; then
+      worktree shared-infra-up
+    fi
+    docker_run_env_flags+=(
+      -e "DATABASE_URL=postgresql://${WTL_DB_USER}:${WTL_DB_PASSWORD}@${WTL_INFRA_DB_HOST}:${WTL_INFRA_DB_PORT}/${WTL_TEST_DB_NAME}"
+      -e "REDIS_URL=redis://${WTL_INFRA_REDIS_HOST}:${WTL_INFRA_REDIS_PORT}/${WTL_REDIS_DB_TEST}"
+      -e "SIDEKIQ_REDIS_URL=redis://${WTL_INFRA_REDIS_HOST}:${WTL_INFRA_REDIS_PORT}/${WTL_REDIS_DB_TEST}"
+    )
+  else
+    if [ "${WTL_DRYRUN:-0}" != "1" ]; then
+      compose_up_isolated_with_retry
+    fi
+    docker_run_env_flags+=(
+      -e "DATABASE_URL=postgresql://${WTL_DB_USER}:${WTL_DB_PASSWORD}@postgres:5432/${WTL_TEST_DB_NAME}"
+      -e "REDIS_URL=redis://redis:6379/${WTL_REDIS_DB_TEST}"
+      -e "SIDEKIQ_REDIS_URL=redis://redis:6379/${WTL_REDIS_DB_TEST}"
+    )
+  fi
+
+  local test_exit=0
+
+  if [ "${WTL_DRYRUN:-0}" = "1" ]; then
+    echo "DRY RUN: docker compose -p $COMPOSE_PROJECT_NAME -f $COMPOSE_FILE run --rm --no-deps -e RAILS_ENV=test ${docker_run_env_flags[*]} backend bundle exec rails db:prepare"
+    echo "DRY RUN: docker compose -p $COMPOSE_PROJECT_NAME -f $COMPOSE_FILE run --rm --no-deps -e RAILS_ENV=test ${docker_run_env_flags[*]} backend bundle exec rspec $*"
+  else
+    docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --no-deps \
+      -e RAILS_ENV=test \
+      "${docker_run_env_flags[@]}" \
+      backend bundle exec rails db:prepare
+
+    docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --no-deps \
+      -e RAILS_ENV=test \
+      "${docker_run_env_flags[@]}" \
+      backend bundle exec rspec "$@" || test_exit=$?
+  fi
+
+  if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ "${WTL_INFRA_MODE:-isolated}" != "shared" ]; then
+    worktree lane-down >/dev/null 2>&1 || true
+  fi
+  return "$test_exit"
+}
+
+run_rspec "$@"

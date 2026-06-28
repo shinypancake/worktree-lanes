@@ -133,6 +133,10 @@ wtl_derive() {
   WTL_SMTP_HOST="$WTL_INFRA_SMTP_HOST"
   WTL_SMTP_TCP_PORT="$WTL_INFRA_SMTP_PORT"
 
+  # DB credentials (consumed by ported subcommands for DATABASE_URL construction)
+  WTL_DB_USER="$WTL_CFG_DB_USER"
+  WTL_DB_PASSWORD="$WTL_CFG_DB_PASSWORD"
+
   # Host loopback (Firefox CI workaround)
   local host_loopback_input; host_loopback_input="$(wtl_getvar "${WTL_CFG_PREFIX}_HOST_LOOPBACK")"
   WTL_HOST_LOOPBACK="${host_loopback_input:-localhost}"
