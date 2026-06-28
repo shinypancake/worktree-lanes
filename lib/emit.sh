@@ -100,12 +100,6 @@ wtl_emit() {
     "${pfx}_REDIS_TCP_PORT" "$WTL_REDIS_TCP_PORT"
     "${pfx}_SMTP_HOST"     "$WTL_SMTP_HOST"
     "${pfx}_SMTP_TCP_PORT" "$WTL_SMTP_TCP_PORT"
-    "${pfx}_DB_USER"       "$WTL_DB_USER"
-    "${pfx}_DB_PASSWORD"   "$WTL_DB_PASSWORD"
-    "${pfx}_HAS_FRONTEND"  "$WTL_HAS_FRONTEND"
-    "${pfx}_HAS_SIDEKIQ"   "$WTL_HAS_SIDEKIQ"
-    "${pfx}_HAS_MAILHOG"   "$WTL_HAS_MAILHOG"
-    "${pfx}_HAS_WEBAUTHN"  "$WTL_HAS_WEBAUTHN"
     "${pfx}_SHARED_INFRA_PROJECT_NAME" "$WTL_SHARED_INFRA_PROJECT_NAME"
     "${pfx}_SHARED_POSTGRES_PORT" "$WTL_SHARED_POSTGRES_PORT"
     "${pfx}_SHARED_REDIS_PORT" "$WTL_SHARED_REDIS_PORT"
@@ -125,6 +119,18 @@ wtl_emit() {
     "${pfx}_FRONTEND_RUN_MODE" "$WTL_FRONTEND_RUN_MODE"
   )
 
+  # Config-derived keys that the CLI adds (not present in the upstream script):
+  # emitted as WTL_* neutral aliases ONLY — never as ${pfx}_*.
+  local wtl_only_keys
+  wtl_only_keys=(
+    WTL_DB_USER       "$WTL_DB_USER"
+    WTL_DB_PASSWORD   "$WTL_DB_PASSWORD"
+    WTL_HAS_FRONTEND  "$WTL_HAS_FRONTEND"
+    WTL_HAS_SIDEKIQ   "$WTL_HAS_SIDEKIQ"
+    WTL_HAS_MAILHOG   "$WTL_HAS_MAILHOG"
+    WTL_HAS_WEBAUTHN  "$WTL_HAS_WEBAUTHN"
+  )
+
   if [ "$mode" = "json" ]; then
     # JSON mode: single object with all keys (prefixed + neutral aliases interleaved)
     printf '{'
@@ -141,6 +147,15 @@ wtl_emit() {
         local neutral_key="WTL_${k#"${pfx}"_}"
         printf ','
         _wtl_emit_kv "json" "$neutral_key" "$v"
+        # After SMTP_TCP_PORT alias, insert the WTL_*-only config keys
+        if [ "$k" = "${pfx}_SMTP_TCP_PORT" ]; then
+          local j=0
+          while [ "$j" -lt "${#wtl_only_keys[@]}" ]; do
+            printf ','
+            _wtl_emit_kv "json" "${wtl_only_keys[$j]}" "${wtl_only_keys[$((j + 1))]}"
+            j=$((j + 2))
+          done
+        fi
       fi
       i=$((i + 2))
     done
@@ -162,6 +177,14 @@ wtl_emit() {
       if [ "${k#"${pfx}"_}" != "$k" ]; then
         local neutral_key="WTL_${k#"${pfx}"_}"
         _wtl_emit_kv "$mode" "$neutral_key" "$v"
+        # After WTL_SMTP_TCP_PORT, insert the WTL_*-only config keys
+        if [ "$k" = "${pfx}_SMTP_TCP_PORT" ]; then
+          local j=0
+          while [ "$j" -lt "${#wtl_only_keys[@]}" ]; do
+            _wtl_emit_kv "$mode" "${wtl_only_keys[$j]}" "${wtl_only_keys[$((j + 1))]}"
+            j=$((j + 2))
+          done
+        fi
       fi
       i=$((i + 2))
     done
