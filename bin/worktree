@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# worktree — per-worktree/lane dev+test isolation CLI.
+set -euo pipefail
+
+# Resolve the install root (follow symlinks; Homebrew symlinks bin/worktree).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  dir="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$dir/$SOURCE"
+done
+WTL_ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+export WTL_ROOT
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  env)
+    # shellcheck source=lib/config.sh
+    . "$WTL_ROOT/lib/config.sh"
+    # shellcheck source=lib/derive.sh
+    . "$WTL_ROOT/lib/derive.sh"
+    # shellcheck source=lib/emit.sh
+    . "$WTL_ROOT/lib/emit.sh"
+    wtl_load_config
+    wtl_derive
+    wtl_emit "$@"
+    ;;
+  help|-h|--help)
+    echo "usage: worktree <env|test-backend|lane-up|lane-down|...> [args]"
+    ;;
+  *)
+    exe="$WTL_ROOT/libexec/$cmd"
+    if [ -x "$exe" ]; then exec "$exe" "$@"; fi
+    echo "worktree: unknown subcommand '$cmd'" >&2; exit 2
+    ;;
+esac
