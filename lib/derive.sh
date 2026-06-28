@@ -1,0 +1,173 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2034  # WTL_* output vars are consumed by emit.sh and callers
+
+# wtl_getvar VAR_NAME — portable indirect variable lookup (works on bash 3.2+)
+wtl_getvar() {
+  eval "printf '%s' \"\${${1}:-}\""
+}
+
+wtl_hash_hex() {
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  fi
+}
+
+wtl_derive() {
+  # Allow WTL_FAKE_ROOT to override the worktree root for golden parity tests.
+  if [ -n "${WTL_FAKE_ROOT:-}" ]; then
+    WTL_WORKTREE_ROOT="$WTL_FAKE_ROOT"
+  else
+    WTL_WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)
+  fi
+
+  WTL_MAIN_REPO=$(git worktree list --porcelain | awk '/^worktree/{print $2; exit}')
+  WTL_COMPOSE_FILE="$WTL_MAIN_REPO/docker-compose.yml"
+
+  # CI lane key: explicit override or auto-derived from GHA env
+  local ci_lane_key_input; ci_lane_key_input="$(wtl_getvar "${WTL_CFG_PREFIX}_CI_LANE_KEY")"
+  local ci_lane_suffix_input; ci_lane_suffix_input="$(wtl_getvar "${WTL_CFG_PREFIX}_CI_LANE_SUFFIX")"
+  WTL_CI_LANE_KEY="$ci_lane_key_input"
+  if [ -z "$WTL_CI_LANE_KEY" ] && [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    WTL_CI_LANE_KEY="gha-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-job}-${RUNNER_NAME:-runner}"
+    if [ -n "$ci_lane_suffix_input" ]; then
+      WTL_CI_LANE_KEY="${WTL_CI_LANE_KEY}-${ci_lane_suffix_input}"
+    fi
+  fi
+
+  WTL_IS_MAIN=0
+  if [ "$WTL_WORKTREE_ROOT" = "$WTL_MAIN_REPO" ]; then
+    WTL_IS_MAIN=1
+  fi
+  # CI lane forces non-main naming regardless of path
+  if [ -n "$WTL_CI_LANE_KEY" ]; then
+    WTL_IS_MAIN=0
+  fi
+
+  # Compute hash for identity + slot
+  local hash_input="$WTL_WORKTREE_ROOT"
+  if [ -n "$WTL_CI_LANE_KEY" ]; then
+    hash_input="$WTL_WORKTREE_ROOT|$WTL_CI_LANE_KEY"
+  fi
+  local hash; hash=$(wtl_hash_hex "$hash_input")
+  WTL_WORKTREE_ID="${hash:0:8}"
+  local slot_hex="${hash:0:6}"
+  local slot_dec; slot_dec=$(printf '%d' "0x$slot_hex")
+  local slot_mod=200
+  if [ -n "$WTL_CI_LANE_KEY" ]; then
+    slot_mod=15000
+  fi
+  local slot=$(( slot_dec % slot_mod ))
+
+  # Derive worktree name from directory basename
+  local base_name; base_name=$(basename "$WTL_WORKTREE_ROOT")
+  if [ -n "$WTL_CI_LANE_KEY" ]; then
+    base_name="ci"
+  fi
+  local safe_name; safe_name=$(printf '%s' "$base_name" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')
+  safe_name=${safe_name#-}
+  safe_name=${safe_name%-}
+  WTL_WORKTREE_NAME="${safe_name:-${WTL_CFG_PROJECT}}"
+
+  WTL_COMPOSE_PROJECT="${WTL_CFG_PROJECT}-${WTL_WORKTREE_NAME}-${WTL_WORKTREE_ID}"
+
+  if [ "$WTL_IS_MAIN" -eq 1 ]; then
+    WTL_COMPOSE_PROJECT="${WTL_CFG_PROJECT}-main"
+    WTL_BACKEND_PORT="$WTL_CFG_MAIN_BACKEND_PORT"
+    WTL_FRONTEND_PORT="$WTL_CFG_MAIN_FRONTEND_PORT"
+    WTL_MAILHOG_UI_PORT="$WTL_CFG_MAIN_MAILHOG_UI_PORT"
+    WTL_MAILHOG_SMTP_PORT="$WTL_CFG_MAIN_MAILHOG_SMTP_PORT"
+    WTL_POSTGRES_PORT="$WTL_CFG_MAIN_POSTGRES_PORT"
+    WTL_REDIS_PORT="$WTL_CFG_MAIN_REDIS_PORT"
+    WTL_DEV_DB_NAME="${WTL_CFG_PROJECT}_development"
+  else
+    WTL_BACKEND_PORT=$(( WTL_CFG_NONMAIN_BACKEND_PORT_BASE + slot ))
+    WTL_FRONTEND_PORT=$(( WTL_CFG_NONMAIN_FRONTEND_PORT_BASE + slot ))
+    WTL_MAILHOG_UI_PORT=$(( WTL_CFG_NONMAIN_MAILHOG_UI_PORT_BASE + slot ))
+    WTL_MAILHOG_SMTP_PORT=$(( WTL_CFG_NONMAIN_MAILHOG_SMTP_PORT_BASE + slot ))
+    WTL_POSTGRES_PORT=$(( WTL_CFG_NONMAIN_POSTGRES_PORT_BASE + slot ))
+    WTL_REDIS_PORT=$(( WTL_CFG_NONMAIN_REDIS_PORT_BASE + slot ))
+    WTL_DEV_DB_NAME="${WTL_CFG_PROJECT}_dev_${WTL_WORKTREE_ID}"
+  fi
+
+  WTL_TEST_DB_NAME="${WTL_CFG_PROJECT}_test_${WTL_WORKTREE_ID}"
+  WTL_POSTGRES_DB="$WTL_DEV_DB_NAME"
+  WTL_REDIS_DB_DEV="$WTL_CFG_REDIS_DB_DEV"
+  WTL_REDIS_DB_SIDEKIQ="$WTL_CFG_REDIS_DB_SIDEKIQ"
+  WTL_REDIS_DB_TEST="$WTL_CFG_REDIS_DB_TEST"
+
+  # Shared infra constants
+  WTL_SHARED_INFRA_PROJECT_NAME="${WTL_CFG_PROJECT}-shared-infra"
+  WTL_SHARED_POSTGRES_PORT=15432
+  WTL_SHARED_REDIS_PORT=16379
+  WTL_SHARED_MAILHOG_SMTP_PORT=11025
+  WTL_SHARED_MAILHOG_UI_PORT=18025
+  WTL_SHARED_DB_HOST="host.docker.internal"
+  WTL_SHARED_REDIS_HOST="host.docker.internal"
+
+  # Infra mode (isolated vs shared)
+  local infra_mode_input; infra_mode_input="$(wtl_getvar "${WTL_CFG_PREFIX}_INFRA_MODE")"
+  WTL_INFRA_MODE="${infra_mode_input:-isolated}"
+
+  WTL_INFRA_DB_HOST="postgres"
+  WTL_INFRA_DB_PORT=5432
+  WTL_INFRA_REDIS_HOST="redis"
+  WTL_INFRA_REDIS_PORT=6379
+  WTL_INFRA_SMTP_HOST="mailhog"
+  WTL_INFRA_SMTP_PORT=1025
+
+  if [ "$WTL_INFRA_MODE" = "shared" ]; then
+    WTL_INFRA_DB_HOST="$WTL_SHARED_DB_HOST"
+    WTL_INFRA_DB_PORT="$WTL_SHARED_POSTGRES_PORT"
+    WTL_INFRA_REDIS_HOST="$WTL_SHARED_REDIS_HOST"
+    WTL_INFRA_REDIS_PORT="$WTL_SHARED_REDIS_PORT"
+    WTL_INFRA_SMTP_HOST="$WTL_SHARED_DB_HOST"
+    WTL_INFRA_SMTP_PORT="$WTL_SHARED_MAILHOG_SMTP_PORT"
+  fi
+
+  WTL_DB_HOST="$WTL_INFRA_DB_HOST"
+  WTL_DB_TCP_PORT="$WTL_INFRA_DB_PORT"
+  WTL_REDIS_HOST="$WTL_INFRA_REDIS_HOST"
+  WTL_REDIS_TCP_PORT="$WTL_INFRA_REDIS_PORT"
+  WTL_SMTP_HOST="$WTL_INFRA_SMTP_HOST"
+  WTL_SMTP_TCP_PORT="$WTL_INFRA_SMTP_PORT"
+
+  # Host loopback (Firefox CI workaround)
+  local host_loopback_input; host_loopback_input="$(wtl_getvar "${WTL_CFG_PREFIX}_HOST_LOOPBACK")"
+  WTL_HOST_LOOPBACK="${host_loopback_input:-localhost}"
+  if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ -z "$host_loopback_input" ]; then
+    WTL_HOST_LOOPBACK="127.0.0.1"
+  fi
+
+  WTL_FRONTEND_URL="http://${WTL_HOST_LOOPBACK}:${WTL_FRONTEND_PORT}"
+  WTL_API_BASE_URL="http://${WTL_HOST_LOOPBACK}:${WTL_BACKEND_PORT}/api/v1"
+  WTL_WS_BASE_URL="ws://${WTL_HOST_LOOPBACK}:${WTL_BACKEND_PORT}/cable"
+  WTL_MAILHOG_API_URL="http://${WTL_HOST_LOOPBACK}:${WTL_MAILHOG_UI_PORT}/api"
+
+  # WebAuthn RP (always computed; emitted selectively by emit.sh)
+  WTL_WEBAUTHN_RP_ORIGIN="$WTL_FRONTEND_URL"
+  WTL_WEBAUTHN_RP_ID="$WTL_HOST_LOOPBACK"
+
+  WTL_CONTAINER_UID=$(id -u)
+  WTL_CONTAINER_GID=$(id -g)
+
+  # Frontend container UID/GID (emitted when WTL_CFG_HAS_FRONTEND=1)
+  local frontend_uid_input; frontend_uid_input="$(wtl_getvar "${WTL_CFG_PREFIX}_FRONTEND_CONTAINER_UID")"
+  local frontend_gid_input; frontend_gid_input="$(wtl_getvar "${WTL_CFG_PREFIX}_FRONTEND_CONTAINER_GID")"
+  WTL_FRONTEND_CONTAINER_UID="${frontend_uid_input:-$WTL_CONTAINER_UID}"
+  WTL_FRONTEND_CONTAINER_GID="${frontend_gid_input:-$WTL_CONTAINER_GID}"
+  # macOS local: run frontend as root to avoid Vite EACCES on anonymous volumes
+  if [ "$(uname -s)" = "Darwin" ] && [ "${GITHUB_ACTIONS:-}" != "true" ] \
+    && [ -z "$frontend_uid_input" ] && [ -z "$frontend_gid_input" ]; then
+    WTL_FRONTEND_CONTAINER_UID=0
+    WTL_FRONTEND_CONTAINER_GID=0
+  fi
+
+  # Frontend run mode (emitted when WTL_CFG_HAS_FRONTEND=1)
+  local frontend_run_mode_input; frontend_run_mode_input="$(wtl_getvar "${WTL_CFG_PREFIX}_FRONTEND_RUN_MODE")"
+  WTL_FRONTEND_RUN_MODE="${frontend_run_mode_input:-dev}"
+  if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ -z "$frontend_run_mode_input" ]; then
+    WTL_FRONTEND_RUN_MODE="preview"
+  fi
+}
