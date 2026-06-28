@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+eval "$(worktree env --shell)"
+
+if [ "${WTL_HAS_FRONTEND:-0}" = "0" ]; then
+  echo "worktree logs-frontend: frontend is not configured for this project (WTL_HAS_FRONTEND=0)" >&2
+  exit 0
+fi
+
+LOG_FILE="$WORKTREE_ROOT/.wtl-lane/frontend.log"
+PID_FILE="$WORKTREE_ROOT/.wtl-lane/frontend.pid"
+
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" >/dev/null 2>&1; then
+  [ -f "$LOG_FILE" ] || touch "$LOG_FILE"
+  exec tail -f "$LOG_FILE"
+fi
+
+exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" logs -f frontend

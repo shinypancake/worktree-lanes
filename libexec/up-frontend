@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Starts the frontend dev server on the deterministic worktree port.
+
+set -euo pipefail
+
+eval "$(worktree env --shell)"
+
+if [ "${WTL_HAS_FRONTEND:-0}" = "0" ]; then
+  echo "worktree up-frontend: frontend is not configured for this project (WTL_HAS_FRONTEND=0)" >&2
+  exit 0
+fi
+
+DETACH=0
+if [ "${1:-}" = "--detach" ] || [ "${WTL_DETACH:-0}" = "1" ]; then
+  DETACH=1
+fi
+
+RUNTIME_DIR="$WORKTREE_ROOT/.wtl-lane"
+PID_FILE="$RUNTIME_DIR/frontend.pid"
+LOG_FILE="$RUNTIME_DIR/frontend.log"
+
+cd "$WORKTREE_ROOT/frontend"
+if [ "$DETACH" -eq 1 ]; then
+  mkdir -p "$RUNTIME_DIR"
+  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" >/dev/null 2>&1; then
+    echo "Frontend already running (pid $(cat "$PID_FILE"))"
+    echo "Logs: $LOG_FILE"
+    exit 0
+  fi
+  : >"$LOG_FILE"
+  nohup env CI=1 VITE_API_BASE_URL="$WTL_API_BASE_URL" \
+    npm run dev -- --host --port "$WTL_FRONTEND_PORT" --strictPort \
+    </dev/null >>"$LOG_FILE" 2>&1 &
+  echo $! >"$PID_FILE"
+  sleep 1
+  if ! kill -0 "$(cat "$PID_FILE")" >/dev/null 2>&1; then
+    echo "Frontend failed to start in background. Log tail:" >&2
+    tail -n 40 "$LOG_FILE" >&2 || true
+    rm -f "$PID_FILE"
+    exit 1
+  fi
+  echo "Frontend started in background on $WTL_FRONTEND_URL (pid $(cat "$PID_FILE"))"
+  echo "Logs: $LOG_FILE"
+  exit 0
+fi
+
+exec env \
+  VITE_API_BASE_URL="$WTL_API_BASE_URL" \
+  npm run dev -- --host --port "$WTL_FRONTEND_PORT" --strictPort

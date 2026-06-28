@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Starts the frontend service in Docker (detached) for the current worktree lane.
+
+set -euo pipefail
+
+eval "$(worktree env --shell --infra-mode=isolated)"
+
+if [ "${WTL_HAS_FRONTEND:-0}" = "0" ]; then
+  echo "worktree up-frontend-container: frontend is not configured for this project (WTL_HAS_FRONTEND=0)" >&2
+  exit 0
+fi
+
+if ! docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q frontend | grep -q .; then
+  if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$WTL_FRONTEND_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Port in use: $WTL_FRONTEND_PORT" >&2
+    exit 2
+  fi
+fi
+
+exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d --no-deps frontend

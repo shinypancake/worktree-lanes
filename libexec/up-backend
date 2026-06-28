@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Starts the backend app for the current repo/worktree using the shared docker-compose stack.
+# In worktrees, mounts the current worktree's backend code into the backend container.
+
+set -euo pipefail
+
+DETACH=0
+if [ "${1:-}" = "--detach" ] || [ "${WTL_DETACH:-0}" = "1" ]; then
+  DETACH=1
+fi
+
+eval "$(worktree env --shell)"
+
+echo "Compose project: $COMPOSE_PROJECT_NAME"
+echo "Backend URL: $WTL_API_BASE_URL"
+
+if [ "$WTL_INFRA_MODE" = "shared" ]; then
+  worktree shared-infra-up >/dev/null
+  export WTL_DB_HOST WTL_DB_TCP_PORT WTL_REDIS_HOST WTL_REDIS_TCP_PORT WTL_SMTP_HOST WTL_SMTP_TCP_PORT
+  if ! docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q backend | grep -q .; then
+    if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$WTL_BACKEND_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+      echo "Port in use: $WTL_BACKEND_PORT" >&2
+      exit 2
+    fi
+  fi
+  worktree sync-gems
+  if [ "$DETACH" -eq 1 ]; then
+    exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d --no-deps backend
+  fi
+  exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up --no-deps backend
+fi
+
+if ! docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q | grep -q .; then
+  worktree env --check-ports >/dev/null
+fi
+
+docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d postgres redis mailhog >/dev/null
+
+worktree sync-gems
+
+if [ "$DETACH" -eq 1 ]; then
+  exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d backend
+fi
+
+exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up backend

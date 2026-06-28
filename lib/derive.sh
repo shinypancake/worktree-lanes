@@ -137,6 +137,12 @@ wtl_derive() {
   WTL_DB_USER="$WTL_CFG_DB_USER"
   WTL_DB_PASSWORD="$WTL_CFG_DB_PASSWORD"
 
+  # Feature flags (consumed by ported subcommands to gate optional services)
+  WTL_HAS_FRONTEND="$WTL_CFG_HAS_FRONTEND"
+  WTL_HAS_SIDEKIQ="$WTL_CFG_HAS_SIDEKIQ"
+  WTL_HAS_MAILHOG="$WTL_CFG_HAS_MAILHOG"
+  WTL_HAS_WEBAUTHN="$WTL_CFG_HAS_WEBAUTHN"
+
   # Host loopback (Firefox CI workaround)
   local host_loopback_input; host_loopback_input="$(wtl_getvar "${WTL_CFG_PREFIX}_HOST_LOOPBACK")"
   WTL_HOST_LOOPBACK="${host_loopback_input:-localhost}"

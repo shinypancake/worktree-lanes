@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+eval "$(worktree env --shell)"
+
+if [ "${WTL_HAS_SIDEKIQ:-0}" = "0" ]; then
+  echo "worktree logs-sidekiq: sidekiq is not configured for this project (WTL_HAS_SIDEKIQ=0)" >&2
+  exit 0
+fi
+
+exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" logs -f sidekiq "$@"

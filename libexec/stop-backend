@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+eval "$(worktree env --shell)"
+exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" stop backend "$@"

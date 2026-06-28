@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+eval "$(worktree env --shell)"
+
+if [ "${WTL_HAS_FRONTEND:-0}" = "0" ]; then
+  echo "worktree stop-frontend: frontend is not configured for this project (WTL_HAS_FRONTEND=0)" >&2
+  exit 0
+fi
+
+PID_FILE="$WORKTREE_ROOT/.wtl-lane/frontend.pid"
+
+if [ -f "$PID_FILE" ]; then
+  PID=$(cat "$PID_FILE" 2>/dev/null || true)
+  if [ -n "$PID" ] && kill -0 "$PID" >/dev/null 2>&1; then
+    kill "$PID"
+    echo "Stopped frontend pid $PID"
+    rm -f "$PID_FILE"
+    exit 0
+  fi
+  rm -f "$PID_FILE"
+fi
+
+docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" stop frontend >/dev/null 2>&1 || true
+echo "Stopped frontend service (if running)."

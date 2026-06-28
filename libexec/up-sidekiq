@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Starts sidekiq for the current worktree lane.
+
+set -euo pipefail
+
+DETACH=0
+if [ "${1:-}" = "--detach" ] || [ "${WTL_DETACH:-0}" = "1" ]; then
+  DETACH=1
+fi
+
+eval "$(worktree env --shell)"
+
+if [ "${WTL_HAS_SIDEKIQ:-0}" = "0" ]; then
+  echo "worktree up-sidekiq: sidekiq is not configured for this project (WTL_HAS_SIDEKIQ=0)" >&2
+  exit 0
+fi
+
+if [ "$WTL_INFRA_MODE" = "shared" ]; then
+  worktree shared-infra-up >/dev/null
+  export WTL_DB_HOST WTL_DB_TCP_PORT WTL_REDIS_HOST WTL_REDIS_TCP_PORT WTL_SMTP_HOST WTL_SMTP_TCP_PORT
+  worktree sync-gems
+  if [ "$DETACH" -eq 1 ]; then
+    exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d --no-deps sidekiq
+  fi
+  exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up --no-deps sidekiq
+fi
+
+if ! docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q | grep -q .; then
+  worktree env --check-ports >/dev/null
+fi
+
+docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d postgres redis >/dev/null
+
+worktree sync-gems
+
+if [ "$DETACH" -eq 1 ]; then
+  exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d sidekiq
+fi
+
+exec docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up sidekiq

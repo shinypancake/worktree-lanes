@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Runs an arbitrary command in the backend container with the current
+# worktree's backend code mounted. Works from both main repo and worktrees.
+#
+# Usage: worktree run-backend <command> [args...]
+# Example: worktree run-backend bundle exec rubocop -a
+
+set -euo pipefail
+
+eval "$(worktree env --shell)"
+EFFECTIVE_RAILS_ENV="${RAILS_ENV:-development}"
+EFFECTIVE_RACK_ENV="${RACK_ENV:-$EFFECTIVE_RAILS_ENV}"
+BASE_CI_LANE_SUFFIX="${WTL_CI_LANE_SUFFIX:-}"
+CI_INFRA_STARTUP_ATTEMPTS=0
+CI_INFRA_STARTUP_MAX_ATTEMPTS=3
+CI_INFRA_JANITOR_RAN=0
+
+# shellcheck disable=SC2329  # invoked via trap
+cleanup_compose_on_exit() {
+  if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ "${WTL_INFRA_MODE:-isolated}" != "shared" ]; then
+    worktree lane-down >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_compose_on_exit EXIT INT TERM
+
+compose_up_isolated_with_retry() {
+  while [ "$CI_INFRA_STARTUP_ATTEMPTS" -lt "$CI_INFRA_STARTUP_MAX_ATTEMPTS" ]; do
+    if [ "$CI_INFRA_STARTUP_ATTEMPTS" -gt 0 ] && [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+      retry_suffix="${BASE_CI_LANE_SUFFIX:-backend}-r${CI_INFRA_STARTUP_ATTEMPTS}"
+      export WTL_CI_LANE_SUFFIX="$retry_suffix"
+      eval "$(worktree env --shell)"
+      echo "Retrying backend infra startup with CI lane suffix: $WTL_CI_LANE_SUFFIX" >&2
+    fi
+
+    local up_log
+    up_log="$(mktemp)"
+    if docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d postgres redis mailhog >"$up_log" 2>&1; then
+      rm -f "$up_log"
+      return 0
+    fi
+
+    if [ "${GITHUB_ACTIONS:-}" = "true" ] && \
+      grep -Eqi 'port is already allocated|failed to bind host port|Port in use:|predefined address pools have been fully subnetted|missing dependency [a-z0-9_-]+|dependency [a-z0-9_-]+ failed to start|container [^ ]+ exited \(0\)|No such container:' "$up_log"; then
+      local subnet_exhausted=0
+      grep -Eqi 'predefined address pools have been fully subnetted' "$up_log" && subnet_exhausted=1
+      echo "CI backend infra startup hit a Docker/Compose startup error (network/dependency) (attempt $((CI_INFRA_STARTUP_ATTEMPTS + 1))/$CI_INFRA_STARTUP_MAX_ATTEMPTS)." >&2
+      sed -n '1,120p' "$up_log" >&2 || true
+      docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1 || true
+      if [ "$subnet_exhausted" -eq 1 ] && [ "$CI_INFRA_JANITOR_RAN" -eq 0 ]; then
+        echo "Running CI compose janitor before retry to free leaked Docker networks..." >&2
+        worktree runner-clean-ci --apply --max-age=120 >&2 || true
+        CI_INFRA_JANITOR_RAN=1
+      fi
+      rm -f "$up_log"
+      CI_INFRA_STARTUP_ATTEMPTS=$((CI_INFRA_STARTUP_ATTEMPTS + 1))
+      continue
+    fi
+
+    cat "$up_log" >&2 || true
+    rm -f "$up_log"
+    return 1
+  done
+
+  echo "Failed to start backend infra after $CI_INFRA_STARTUP_MAX_ATTEMPTS attempts." >&2
+  return 1
+}
+
+docker_db_name="$WTL_DEV_DB_NAME"
+docker_redis_db="$WTL_REDIS_DB_DEV"
+docker_sidekiq_redis_db="$WTL_REDIS_DB_SIDEKIQ"
+
+if [ "$EFFECTIVE_RAILS_ENV" = "test" ]; then
+  docker_db_name="$WTL_TEST_DB_NAME"
+  docker_redis_db="$WTL_REDIS_DB_TEST"
+  docker_sidekiq_redis_db="$WTL_REDIS_DB_TEST"
+fi
+
+docker_run_env_flags=(
+  -e "RAILS_ENV=${EFFECTIVE_RAILS_ENV}"
+  -e "RACK_ENV=${EFFECTIVE_RACK_ENV}"
+)
+if [ "$WTL_INFRA_MODE" = "shared" ]; then
+  worktree shared-infra-up >/dev/null
+  docker_run_env_flags+=(
+    -e "DATABASE_URL=postgresql://${WTL_DB_USER}:${WTL_DB_PASSWORD}@${WTL_INFRA_DB_HOST}:${WTL_INFRA_DB_PORT}/${docker_db_name}"
+    -e "REDIS_URL=redis://${WTL_INFRA_REDIS_HOST}:${WTL_INFRA_REDIS_PORT}/${docker_redis_db}"
+    -e "SIDEKIQ_REDIS_URL=redis://${WTL_INFRA_REDIS_HOST}:${WTL_INFRA_REDIS_PORT}/${docker_sidekiq_redis_db}"
+    -e "SMTP_ADDRESS=${WTL_INFRA_SMTP_HOST}"
+    -e "SMTP_PORT=${WTL_INFRA_SMTP_PORT}"
+  )
+else
+  compose_up_isolated_with_retry
+  docker_run_env_flags+=(
+    -e "DATABASE_URL=postgresql://${WTL_DB_USER}:${WTL_DB_PASSWORD}@postgres:5432/${docker_db_name}"
+    -e "REDIS_URL=redis://redis:6379/${docker_redis_db}"
+    -e "SIDEKIQ_REDIS_URL=redis://redis:6379/${docker_sidekiq_redis_db}"
+  )
+fi
+
+# Rebuild the backend image when Gemfile.lock changed before running, so
+# commands like backend:test/backend:check don't fail with Bundler::GemNotFound
+# after a dependency bump. Skipped in CI, where lanes build the image fresh.
+if [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+  worktree sync-gems
+fi
+
+RUN_EXIT=0
+docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --no-deps \
+  "${docker_run_env_flags[@]}" \
+  backend "$@" || RUN_EXIT=$?
+
+if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ "${WTL_INFRA_MODE:-isolated}" != "shared" ]; then
+  worktree lane-down >/dev/null 2>&1 || true
+fi
+trap - EXIT INT TERM
+exit "$RUN_EXIT"
