@@ -1,0 +1,454 @@
+#!/usr/bin/env bash
+# Automated parallel worktree validation harness.
+
+set -euo pipefail
+
+MODE="quick"
+KEEP=0
+BASE_REF="HEAD"
+FAILED_STEP=""
+ARTIFACTS_DIR="${WTL_VALIDATE_ARTIFACTS_DIR:-}"
+VALIDATE_LOCK_DIR="${WTL_VALIDATE_LOCK_DIR:-/tmp/${WTL_PROJECT:-wtl}-validate-parallel.lock}"
+VALIDATE_LOCK_ACQUIRED=0
+
+# Source config early to get WTL_PROJECT for lock path before full env eval.
+# We walk up from cwd to find worktree.config just like lib/config.sh does.
+_wtl_find_config_early() {
+  local dir; dir="$(pwd -P)"
+  while [ "$dir" != "/" ]; do
+    [ -f "$dir/worktree.config" ] && { printf '%s\n' "$dir/worktree.config"; return 0; }
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+if cfg=$(_wtl_find_config_early 2>/dev/null); then
+  # shellcheck disable=SC1090
+  . "$cfg"
+  VALIDATE_LOCK_DIR="${WTL_VALIDATE_LOCK_DIR:-/tmp/${WTL_PROJECT:-wtl}-validate-parallel.lock}"
+fi
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --quick) MODE="quick" ;;
+    --full) MODE="full" ;;
+    --keep) KEEP=1 ;;
+    --ref)
+      BASE_REF="${2:-HEAD}"
+      shift
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+ROOT=$(pwd -P)
+STARTED_AT_UTC=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+SHARED_INFRA_WAS_RUNNING=0
+
+# Detect shared infra using config-driven project name (not hardcoded brand).
+eval "$(worktree env --shell --infra-mode=shared)"
+if docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q 2>/dev/null | grep -q .; then
+  SHARED_INFRA_WAS_RUNNING=1
+fi
+if [ "${WTL_VALIDATE_ALLOW_DIRTY:-0}" != "1" ] && [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+  echo "Refusing to run validation from a dirty worktree (script validates git state at HEAD)." >&2
+  echo "Commit/stash changes first, or set WTL_VALIDATE_ALLOW_DIRTY=1 to proceed anyway." >&2
+  exit 1
+fi
+
+acquire_validation_lock() {
+  local waited=0
+  while :; do
+    if mkdir "$VALIDATE_LOCK_DIR" 2>/dev/null; then
+      printf '%s\n' "$$" >"$VALIDATE_LOCK_DIR/pid" 2>/dev/null || true
+      VALIDATE_LOCK_ACQUIRED=1
+      return 0
+    fi
+
+    if [ -f "$VALIDATE_LOCK_DIR/pid" ]; then
+      local owner_pid
+      owner_pid=$(cat "$VALIDATE_LOCK_DIR/pid" 2>/dev/null || true)
+      if [ -n "$owner_pid" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+        rm -rf "$VALIDATE_LOCK_DIR" 2>/dev/null || true
+        continue
+      fi
+    fi
+
+    if [ "$waited" -eq 0 ]; then
+      echo "Waiting for validation lock: $VALIDATE_LOCK_DIR"
+    elif [ $((waited % 10)) -eq 0 ]; then
+      echo "Still waiting for validation lock ($waited s): $VALIDATE_LOCK_DIR"
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+acquire_validation_lock
+
+is_github_actions() {
+  [ -n "${GITHUB_ACTIONS:-}" ]
+}
+
+gha_group_start() {
+  is_github_actions && echo "::group::$1"
+}
+
+gha_group_end() {
+  is_github_actions && echo "::endgroup::"
+}
+
+append_step_summary() {
+  [ -n "${GITHUB_STEP_SUMMARY:-}" ] || return 0
+  printf '%s\n' "$*" >>"$GITHUB_STEP_SUMMARY"
+}
+
+ensure_database_yml() {
+  local db_yml
+  db_yml="$1"
+  [ -f "$db_yml" ] && return 0
+
+  mkdir -p "$(dirname "$db_yml")"
+  cat >"$db_yml" <<'EOF'
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+
+development:
+  <<: *default
+  database: backend_development
+
+test:
+  <<: *default
+  database: backend_test
+
+production:
+  <<: *default
+  url: <%= ENV['DATABASE_URL'] %>
+  sslmode: require
+EOF
+  echo "Created fallback $db_yml for validation."
+}
+
+RUN_DIR=$(mktemp -d /tmp/wtl-validate-parallel.XXXXXX)
+WT1="$RUN_DIR/wt1"
+WT2="$RUN_DIR/wt2"
+LOG_DIR="$RUN_DIR/logs"
+mkdir -p "$LOG_DIR"
+if [ -n "$ARTIFACTS_DIR" ]; then
+  mkdir -p "$ARTIFACTS_DIR"
+fi
+
+persist_artifacts() {
+  [ -n "$ARTIFACTS_DIR" ] || return 0
+  [ -d "$RUN_DIR" ] || return 0
+
+  mkdir -p "$ARTIFACTS_DIR"
+  rm -rf "$ARTIFACTS_DIR/logs"
+  cp -R "$LOG_DIR" "$ARTIFACTS_DIR/logs" 2>/dev/null || true
+  [ -f "$LOG_DIR/wt1-env.json" ] && cp "$LOG_DIR/wt1-env.json" "$ARTIFACTS_DIR/wt1-env.json" || true
+  [ -f "$LOG_DIR/wt2-env.json" ] && cp "$LOG_DIR/wt2-env.json" "$ARTIFACTS_DIR/wt2-env.json" || true
+
+  cat >"$ARTIFACTS_DIR/summary.txt" <<EOF
+mode=$MODE
+base_ref=$BASE_REF
+root=$ROOT
+started_at_utc=$STARTED_AT_UTC
+failed_step=$FAILED_STEP
+run_dir=$RUN_DIR
+logs_dir=$LOG_DIR
+EOF
+
+  {
+    echo "# Parallel Worktree Validation"
+    echo
+    echo "- Mode: \`$MODE\`"
+    echo "- Base ref: \`$BASE_REF\`"
+    echo "- Started (UTC): \`$STARTED_AT_UTC\`"
+    if [ -n "$FAILED_STEP" ]; then
+      echo "- Result: \`FAIL\`"
+      echo "- Failed step: \`$FAILED_STEP\`"
+    else
+      echo "- Result: \`PASS\`"
+    fi
+    echo "- Logs dir (runner local): \`$LOG_DIR\`"
+    echo
+    echo "## Log Files"
+    if [ -d "$LOG_DIR" ]; then
+      # shellcheck disable=SC2016  # backticks here are markdown formatting, not shell expansion
+      (cd "$LOG_DIR" && find . -maxdepth 1 -type f -printf '%f\n' | sort | sed 's#^#- `logs/#; s#$#`#')
+    fi
+  } >"$ARTIFACTS_DIR/summary.md"
+}
+
+capture_lane_context() {
+  local wt="$1"
+  local wt_label="$2"
+  local step="$3"
+  local prefix="$LOG_DIR/${wt_label}-${step}"
+
+  (
+    cd "$wt"
+    eval "$(worktree env --shell --infra-mode=isolated)"
+    docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps
+  ) >"${prefix}-compose-ps.log" 2>&1 || true
+
+  (
+    cd "$wt"
+    eval "$(worktree env --shell --infra-mode=isolated)"
+    docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" logs --no-color --tail=200
+  ) >"${prefix}-compose-logs.log" 2>&1 || true
+}
+
+capture_shared_infra_context() {
+  local step="$1"
+  local prefix="$LOG_DIR/shared-${step}"
+  (
+    cd "$ROOT"
+    eval "$(worktree env --shell --infra-mode=shared)"
+    docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" ps
+  ) >"${prefix}-compose-ps.log" 2>&1 || true
+
+  (
+    cd "$ROOT"
+    eval "$(worktree env --shell --infra-mode=shared)"
+    docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" logs --no-color --tail=200
+  ) >"${prefix}-compose-logs.log" 2>&1 || true
+}
+
+cleanup() {
+  set +e
+  persist_artifacts
+  for wt in "$WT1" "$WT2"; do
+    [ -d "$wt" ] || continue
+    (cd "$wt" && worktree lane-down >/dev/null 2>&1) || true
+  done
+  if [ "$KEEP" -ne 1 ]; then
+    if [ "$MODE" = "full" ] && [ "$SHARED_INFRA_WAS_RUNNING" -ne 1 ]; then
+      (cd "$ROOT" && worktree shared-infra-down >/dev/null 2>&1) || true
+    fi
+    git -C "$ROOT" worktree remove --force "$WT1" >/dev/null 2>&1 || true
+    git -C "$ROOT" worktree remove --force "$WT2" >/dev/null 2>&1 || true
+    rm -rf "$RUN_DIR"
+  else
+    echo "Artifacts kept at: $RUN_DIR"
+  fi
+  if [ "${VALIDATE_LOCK_ACQUIRED:-0}" -eq 1 ]; then
+    rm -rf "$VALIDATE_LOCK_DIR" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+echo "Creating temp worktrees..."
+ensure_database_yml "$ROOT/backend/config/database.yml"
+git -C "$ROOT" worktree add --detach "$WT1" "$BASE_REF" >/dev/null
+git -C "$ROOT" worktree add --detach "$WT2" "$BASE_REF" >/dev/null
+
+for wt in "$WT1" "$WT2"; do
+  [ -f "$wt/.env" ] || cp "$ROOT/.env" "$wt/.env"
+  mkdir -p "$wt/backend/config"
+  [ -f "$wt/backend/config/database.yml" ] || cp "$ROOT/backend/config/database.yml" "$wt/backend/config/database.yml"
+done
+
+run_cmd() {
+  local wt="$1"
+  local wt_label="$2"
+  local step="$3"
+  shift 3
+  local logfile="$LOG_DIR/${wt_label}-${step}.log"
+  (
+    set -o pipefail
+    cd "$wt"
+    echo "cwd: $wt"
+    echo "cmd: $*"
+    echo
+    "$@"
+  ) 2>&1 | sed -u "s/^/[${wt_label} ${step}] /" | tee "$logfile"
+}
+
+print_log_tail() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  echo "--- tail: ${file#"$RUN_DIR"/} ---" >&2
+  tail -n 120 "$file" >&2 || true
+}
+
+print_failure_context() {
+  local step="$1"
+  echo "Collecting failure context for step: $step" >&2
+  capture_lane_context "$WT1" "wt1" "$step"
+  capture_lane_context "$WT2" "wt2" "$step"
+  case "$step" in
+    *shared*)
+      capture_shared_infra_context "$step"
+      ;;
+  esac
+  print_log_tail "$LOG_DIR/wt1-${step}.log"
+  print_log_tail "$LOG_DIR/wt2-${step}.log"
+  print_log_tail "$LOG_DIR/wt1-${step}-compose-ps.log"
+  print_log_tail "$LOG_DIR/wt2-${step}-compose-ps.log"
+  print_log_tail "$LOG_DIR/wt1-${step}-compose-logs.log"
+  print_log_tail "$LOG_DIR/wt2-${step}-compose-logs.log"
+  print_log_tail "$LOG_DIR/shared-${step}-compose-ps.log"
+  print_log_tail "$LOG_DIR/shared-${step}-compose-logs.log"
+}
+
+run_parallel_pair() {
+  local step="$1"
+  shift
+  local started rc1 rc2
+  started=$(date +%s)
+  gha_group_start "parallel step: $step"
+  echo "==> $step (parallel)"
+  run_cmd "$WT1" "wt1" "$step" "$@" &
+  pid1=$!
+  run_cmd "$WT2" "wt2" "$step" "$@" &
+  pid2=$!
+  set +e
+  wait "$pid1"; rc1=$?
+  wait "$pid2"; rc2=$?
+  set -e
+  if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
+    FAILED_STEP="$step"
+    echo "FAIL: $step (wt1=$rc1, wt2=$rc2)" >&2
+    print_failure_context "$step"
+    gha_group_end
+    return 1
+  fi
+  echo "==> $step complete in $(( $(date +%s) - started ))s"
+  gha_group_end
+}
+
+# Start a single worktree's lane with retry on subnet exhaustion or port conflicts.
+# Shared janitor lock file ($RUN_DIR/ci-lane-janitor.lock) ensures only one of
+# the two parallel subprocesses runs the compose janitor when subnet exhaustion
+# is detected.
+run_lane_up_single_wt() {
+  local wt="$1"
+  local wt_label="$2"
+  local base_suffix="${WTL_CI_LANE_SUFFIX:-}"
+  local max_attempts=3
+  local attempts=0
+  local logfile="$LOG_DIR/${wt_label}-lane-up.log"
+  local up_log lane_rc
+
+  while [ "$attempts" -lt "$max_attempts" ]; do
+    if [ "$attempts" -gt 0 ] && [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+      local retry_suffix="${base_suffix:-lane-up}-r${attempts}"
+      export WTL_CI_LANE_SUFFIX="$retry_suffix"
+      echo "[${wt_label} lane-up] Retrying with CI lane suffix: $WTL_CI_LANE_SUFFIX" | tee -a "$logfile"
+    fi
+
+    up_log="$(mktemp)"
+    lane_rc=0
+    set +e
+    (
+      cd "$wt"
+      echo "cwd: $wt"
+      echo "cmd: worktree lane-up"
+      echo
+      worktree lane-up
+    ) 2>&1 | tee "$up_log" | tee -a "$logfile" | sed -u "s/^/[${wt_label} lane-up] /" || true
+    lane_rc=${PIPESTATUS[0]}
+    set -e
+
+    if [ "$lane_rc" -eq 0 ]; then
+      rm -f "$up_log"
+      return 0
+    fi
+
+    if [ "${GITHUB_ACTIONS:-}" = "true" ] && \
+      grep -Eqi 'port is already allocated|failed to bind host port|Port in use:|predefined address pools have been fully subnetted|missing dependency [a-z0-9_-]+|dependency [a-z0-9_-]+ failed to start|container [^ ]+ exited \(0\)|Timed out waiting for http://' "$up_log"; then
+      local subnet_exhausted=0
+      grep -Eqi 'predefined address pools have been fully subnetted' "$up_log" && subnet_exhausted=1
+      echo "[${wt_label} lane-up] CI lane startup error (attempt $((attempts + 1))/$max_attempts)." | tee -a "$logfile" >&2
+      sed -n '1,120p' "$up_log" >&2 || true
+      (cd "$wt" && worktree lane-down >/dev/null 2>&1) || true
+      if [ "$subnet_exhausted" -eq 1 ]; then
+        # Atomic janitor guard — only one of the two parallel wt processes should run it.
+        if mkdir "$RUN_DIR/ci-lane-janitor.lock" 2>/dev/null; then
+          echo "[${wt_label} lane-up] Running CI compose janitor before retry..." | tee -a "$logfile" >&2
+          worktree runner-clean-ci --apply --max-age=120 >&2 || true
+        fi
+      fi
+      rm -f "$up_log"
+      attempts=$((attempts + 1))
+      continue
+    fi
+
+    cat "$up_log" >&2 || true
+    rm -f "$up_log"
+    return 1
+  done
+
+  echo "[${wt_label} lane-up] Failed to start lane after $max_attempts attempts." | tee -a "$logfile" >&2
+  return 1
+}
+
+run_parallel_lane_up() {
+  local started rc1 rc2
+  started=$(date +%s)
+  gha_group_start "parallel step: lane-up"
+  echo "==> lane-up (parallel)"
+  run_lane_up_single_wt "$WT1" "wt1" &
+  pid1=$!
+  run_lane_up_single_wt "$WT2" "wt2" &
+  pid2=$!
+  rc1=0
+  rc2=0
+  set +e
+  wait "$pid1"; rc1=$?
+  wait "$pid2"; rc2=$?
+  set -e
+  if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
+    FAILED_STEP="lane-up"
+    echo "FAIL: lane-up (wt1=$rc1, wt2=$rc2)" >&2
+    print_failure_context "lane-up"
+    gha_group_end
+    return 1
+  fi
+  echo "==> lane-up complete in $(( $(date +%s) - started ))s"
+  gha_group_end
+}
+
+echo "Running setup and doctor in parallel..."
+run_parallel_pair setup npm run setup
+run_parallel_pair doctor npm run doctor
+
+echo "Collecting lane configs..."
+(cd "$WT1" && worktree env --json) >"$LOG_DIR/wt1-env.json"
+(cd "$WT2" && worktree env --json) >"$LOG_DIR/wt2-env.json"
+if cmp -s "$LOG_DIR/wt1-env.json" "$LOG_DIR/wt2-env.json"; then
+  echo "FAIL: worktree lane envs are identical" >&2
+  FAILED_STEP="lane-config-compare"
+  exit 1
+fi
+echo "Lane configs differ (expected)."
+if command -v jq >/dev/null 2>&1; then
+  gha_group_start "lane env summary"
+  jq -r '"wt1 backend=\(.WTL_BACKEND_PORT) frontend=\(.WTL_FRONTEND_PORT) mailhog=\(.WTL_MAILHOG_UI_PORT) db=\(.WTL_DEV_DB_NAME) test_db=\(.WTL_TEST_DB_NAME)"' "$LOG_DIR/wt1-env.json" || true
+  jq -r '"wt2 backend=\(.WTL_BACKEND_PORT) frontend=\(.WTL_FRONTEND_PORT) mailhog=\(.WTL_MAILHOG_UI_PORT) db=\(.WTL_DEV_DB_NAME) test_db=\(.WTL_TEST_DB_NAME)"' "$LOG_DIR/wt2-env.json" || true
+  gha_group_end
+fi
+
+echo "Starting isolated lanes in parallel..."
+run_parallel_lane_up
+
+echo "Running backend test smoke in parallel..."
+run_parallel_pair backend-test worktree test-backend spec/requests/api/v1/health_spec.rb
+
+if [ "$MODE" = "full" ]; then
+  echo "Running backend test smoke in parallel (shared infra mode)..."
+  run_parallel_pair backend-test-shared env WTL_INFRA_MODE=shared worktree test-backend spec/requests/api/v1/health_spec.rb
+fi
+
+echo
+echo "PASS: parallel validation (${MODE})"
+echo "Logs: $LOG_DIR"
+append_step_summary "### Parallel Validation"
+append_step_summary "- Mode: \`$MODE\`"
+append_step_summary "- Result: \`PASS\`"
