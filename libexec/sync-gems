@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Rebuilds the backend image when backend/Gemfile.lock has changed.
+#
+# Gems are baked into the backend/sidekiq image by the Dockerfile build stage
+# (no bundle volume — see docker-compose.yml). After Gemfile.lock changes (e.g.
+# pulling dependency bumps), the existing image is stale and the containers
+# crash on boot with Bundler::GemNotFound. `docker compose up`/`run` does NOT
+# rebuild a stale image — it only builds when the image is missing — so the
+# rebuild has to be triggered explicitly. This does that.
+#
+# Idempotent and cheap: skips when Gemfile.lock is unchanged since the last
+# successful build for this compose project. Pass --force to rebuild regardless.
+#
+# Callers pick up the new image automatically: `compose up` recreates a
+# container whose image changed, and `compose run` always uses the latest image.
+
+set -euo pipefail
+
+FORCE=0
+for arg in "$@"; do
+  case "$arg" in
+    -f|--force) FORCE=1 ;;
+    -h|--help)
+      echo "Usage: worktree sync-gems [--force]"
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $arg" >&2
+      echo "Usage: worktree sync-gems [--force]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+eval "$(worktree env --shell)"
+
+LOCKFILE="$WORKTREE_ROOT/backend/Gemfile.lock"
+if [ ! -f "$LOCKFILE" ]; then
+  echo "sync-gems: $LOCKFILE not found; skipping" >&2
+  exit 0
+fi
+
+# Docker unreachable is not this script's problem to report — the caller's own
+# compose command will surface it with a clearer message.
+if ! docker info >/dev/null 2>&1; then
+  exit 0
+fi
+
+hash_lockfile() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$LOCKFILE" | awk '{print $1}'
+  else
+    sha256sum "$LOCKFILE" | awk '{print $1}'
+  fi
+}
+
+STATE_DIR="$WORKTREE_ROOT/.wtl-lane"
+STATE_FILE="$STATE_DIR/bundle-sync.$COMPOSE_PROJECT_NAME.sha"
+CURRENT_HASH="$(hash_lockfile)"
+
+if [ "$FORCE" -eq 0 ] && [ -f "$STATE_FILE" ] && [ "$(cat "$STATE_FILE" 2>/dev/null)" = "$CURRENT_HASH" ]; then
+  exit 0
+fi
+
+echo "==> Backend gems changed — rebuilding image (one-time after a dependency change)"
+# The build stage runs `bundle install` against the copied Gemfile.lock and
+# compiles native extensions, then bakes the gems into the image. Build fails
+# loudly (set -e) if a gem can't install, so a clean build means gems are good.
+docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" build backend sidekiq
+
+mkdir -p "$STATE_DIR"
+printf '%s\n' "$CURRENT_HASH" > "$STATE_FILE"
+echo "==> Backend image rebuilt"

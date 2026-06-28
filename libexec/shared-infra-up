@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Starts shared infra (postgres/redis/mailhog) for optional lighter worktree backend workflows.
+
+set -euo pipefail
+
+eval "$(worktree env --shell --infra-mode=shared)"
+
+export WORKTREE_ROOT="$MAIN_REPO"
+export WTL_POSTGRES_PORT="$WTL_SHARED_POSTGRES_PORT"
+export WTL_REDIS_PORT="$WTL_SHARED_REDIS_PORT"
+export WTL_MAILHOG_SMTP_PORT="$WTL_SHARED_MAILHOG_SMTP_PORT"
+export WTL_MAILHOG_UI_PORT="$WTL_SHARED_MAILHOG_UI_PORT"
+LOCKDIR="/tmp/${WTL_PROJECT}-shared-infra-up.lock"
+
+wait_for_health() {
+  local service="$1"
+  local timeout="${2:-60}"
+  local cid status
+  cid=$(docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q "$service")
+  if [ -z "$cid" ]; then
+    echo "No container found for shared infra service: $service" >&2
+    return 1
+  fi
+
+  echo "Waiting for shared $service ..."
+  for attempt in $(seq 1 "$timeout"); do
+    status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" 2>/dev/null || echo "unknown")
+    if [ "$status" = "healthy" ] || [ "$status" = "running" ]; then
+      echo "Ready: shared $service ($status)"
+      return 0
+    fi
+    if [ $((attempt % 5)) -eq 0 ]; then
+      echo "Still waiting for shared $service ($attempt/$timeout, status=$status)"
+    fi
+    sleep 1
+  done
+
+  echo "Timed out waiting for shared $service" >&2
+  docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" ps >&2 || true
+  return 1
+}
+
+wait_for_http() {
+  local url="$1"
+  local label="$2"
+  local timeout="${3:-30}"
+  echo "Waiting for $label ($url) ..."
+  for attempt in $(seq 1 "$timeout"); do
+    if command -v curl >/dev/null 2>&1 && curl -fsS --connect-timeout 1 --max-time 2 "$url" >/dev/null 2>&1; then
+      echo "Ready: $label"
+      return 0
+    fi
+    if [ $((attempt % 5)) -eq 0 ]; then
+      echo "Still waiting for $label ($attempt/$timeout)"
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for $label" >&2
+  return 1
+}
+
+acquire_lock() {
+  local waited=0 poll=1 max_wait=120
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do
+    if [ "$waited" -ge "$max_wait" ]; then
+      echo "Timed out waiting for shared infra startup lock ($LOCKDIR)" >&2
+      return 1
+    fi
+    if [ $((waited % 5)) -eq 0 ]; then
+      echo "Waiting for shared infra startup lock ..."
+    fi
+    sleep "$poll"
+    waited=$((waited + poll))
+  done
+  trap 'rm -rf "$LOCKDIR"' EXIT
+}
+
+acquire_lock
+docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" up -d postgres redis mailhog
+wait_for_health postgres 90
+wait_for_health redis 60
+wait_for_http "http://localhost:$WTL_SHARED_MAILHOG_UI_PORT/api/v2/messages" "shared mailhog API" 30

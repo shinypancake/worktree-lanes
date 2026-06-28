@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+eval "$(worktree env --shell --infra-mode=shared)"
+export WORKTREE_ROOT="$MAIN_REPO"
+export WTL_POSTGRES_PORT="$WTL_SHARED_POSTGRES_PORT"
+export WTL_REDIS_PORT="$WTL_SHARED_REDIS_PORT"
+export WTL_MAILHOG_SMTP_PORT="$WTL_SHARED_MAILHOG_SMTP_PORT"
+export WTL_MAILHOG_UI_PORT="$WTL_SHARED_MAILHOG_UI_PORT"
+
+exec docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" down -v "$@"
