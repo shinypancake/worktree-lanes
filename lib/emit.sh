@@ -62,7 +62,7 @@ wtl_emit() {
 
   local pfx="$WTL_CFG_PREFIX"
 
-  # Build the key-value list mirroring Huddle's exact key order.
+  # Build the key-value list in canonical key order (mirrors the derivation order).
   # Bare keys (WORKTREE_ID, COMPOSE_FILE, etc.) are emitted as-is.
   # Prefixed keys (${PREFIX}_*) are emitted as prefixed + neutral (WTL_*) pairs.
   local keys
@@ -140,7 +140,7 @@ wtl_emit() {
     done
     printf '}\n'
   else
-    # Shell/plain mode: emit all prefixed keys first (matching Huddle order), then WTL_* aliases
+    # Shell/plain mode: emit all prefixed keys first (in canonical order), then WTL_* aliases
     local i=0
     while [ "$i" -lt "${#keys[@]}" ]; do
       local k="${keys[$i]}"
