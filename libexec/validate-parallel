@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Automated parallel worktree validation harness.
+# shellcheck disable=SC1091  # sourced lib files are located at runtime via WTL_ROOT
 
 set -euo pipefail
 
@@ -12,16 +13,11 @@ VALIDATE_LOCK_DIR="${WTL_VALIDATE_LOCK_DIR:-/tmp/${WTL_PROJECT:-wtl}-validate-pa
 VALIDATE_LOCK_ACQUIRED=0
 
 # Source config early to get WTL_PROJECT for lock path before full env eval.
-# We walk up from cwd to find worktree.config just like lib/config.sh does.
-_wtl_find_config_early() {
-  local dir; dir="$(pwd -P)"
-  while [ "$dir" != "/" ]; do
-    [ -f "$dir/worktree.config" ] && { printf '%s\n' "$dir/worktree.config"; return 0; }
-    dir="$(dirname "$dir")"
-  done
-  return 1
-}
-if cfg=$(_wtl_find_config_early 2>/dev/null); then
+# Use lib/config.sh:wtl_find_config — single source of truth for config discovery.
+_WTL_ROOT_VP="${WTL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# shellcheck source=../lib/config.sh
+. "$_WTL_ROOT_VP/lib/config.sh"
+if cfg=$(wtl_find_config 2>/dev/null); then
   # shellcheck disable=SC1090
   . "$cfg"
   VALIDATE_LOCK_DIR="${WTL_VALIDATE_LOCK_DIR:-/tmp/${WTL_PROJECT:-wtl}-validate-parallel.lock}"
