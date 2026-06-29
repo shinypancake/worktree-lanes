@@ -415,7 +415,11 @@ run_parallel_lane_up() {
 
 echo "Running setup and doctor in parallel..."
 run_parallel_pair setup npm run setup
-run_parallel_pair doctor npm run doctor
+if [ "${WTL_VALIDATE_DOCTOR:-1}" = "1" ]; then
+  run_parallel_pair doctor npm run doctor
+else
+  echo "Skipping doctor step (WTL_VALIDATE_DOCTOR=0)"
+fi
 
 echo "Collecting lane configs..."
 (cd "$WT1" && worktree env --json) >"$LOG_DIR/wt1-env.json"
@@ -437,11 +441,11 @@ echo "Starting isolated lanes in parallel..."
 run_parallel_lane_up
 
 echo "Running backend test smoke in parallel..."
-run_parallel_pair backend-test worktree test-backend spec/requests/api/v1/health_spec.rb
+run_parallel_pair backend-test worktree test-backend "${WTL_VALIDATE_SMOKE_SPEC:-spec/requests/api/v1/health_spec.rb}"
 
 if [ "$MODE" = "full" ]; then
   echo "Running backend test smoke in parallel (shared infra mode)..."
-  run_parallel_pair backend-test-shared env WTL_INFRA_MODE=shared worktree test-backend spec/requests/api/v1/health_spec.rb
+  run_parallel_pair backend-test-shared env WTL_INFRA_MODE=shared worktree test-backend "${WTL_VALIDATE_SMOKE_SPEC:-spec/requests/api/v1/health_spec.rb}"
 fi
 
 echo

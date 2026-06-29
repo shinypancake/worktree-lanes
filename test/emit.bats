@@ -57,3 +57,27 @@ worktree_env_json() {
   [ "$status" -eq 0 ]
   rm -rf "$symdir"
 }
+
+@test "worktree env emits WTL_VALIDATE_SMOKE_SPEC defaulting to health_spec.rb" {
+  run worktree_env_shell "$BATS_TEST_DIRNAME/fixtures/huddle.worktree.config"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export WTL_VALIDATE_SMOKE_SPEC=spec/requests/api/v1/health_spec.rb"* ]]
+}
+
+@test "worktree env emits WTL_VALIDATE_DOCTOR defaulting to 1" {
+  run worktree_env_shell "$BATS_TEST_DIRNAME/fixtures/huddle.worktree.config"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export WTL_VALIDATE_DOCTOR=1"* ]]
+}
+
+@test "worktree env reflects overridden WTL_VALIDATE_SMOKE_SPEC from config" {
+  run worktree_env_shell "$BATS_TEST_DIRNAME/fixtures/locals-no-doctor.worktree.config"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export WTL_VALIDATE_SMOKE_SPEC=spec/requests/health_spec.rb"* ]]
+}
+
+@test "worktree env reflects WTL_VALIDATE_DOCTOR=0 from config" {
+  run worktree_env_shell "$BATS_TEST_DIRNAME/fixtures/locals-no-doctor.worktree.config"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export WTL_VALIDATE_DOCTOR=0"* ]]
+}
