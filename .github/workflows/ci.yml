@@ -6,7 +6,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck && shellcheck -S style bin/worktree lib/*.sh libexec/* || true
+        run: sudo apt-get update && sudo apt-get install -y shellcheck && shellcheck -S style bin/worktree lib/*.sh libexec/*
       - name: bats
         run: |
           git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats
