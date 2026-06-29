@@ -6,6 +6,9 @@ setup() {
   root="$(setup_repo_root "$BATS_TEST_DIRNAME/fixtures/huddle.worktree.config")"
   cd "$root"
   wtl_load_config
+  # Unset GHA env so tests that don't explicitly set GITHUB_ACTIONS run in non-CI mode.
+  # Tests that need CI-lane behavior set their own GITHUB_ACTIONS=true explicitly.
+  unset GITHUB_ACTIONS GITHUB_RUN_ID GITHUB_RUN_ATTEMPT GITHUB_JOB RUNNER_NAME
 }
 
 @test "worktree id is sha256[0:8] of the worktree root, stable" {

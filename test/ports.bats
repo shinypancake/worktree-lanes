@@ -10,6 +10,8 @@ setup() {
   # (avoids relying on git worktree list on the CI runner).
   export WTL_FAKE_ROOT="$TEST_ROOT"
   export WTL_FAKE_MAIN_REPO="$TEST_ROOT"
+  # Unset GHA env: CI lane key forces IS_MAIN=0 regardless of path match.
+  unset GITHUB_ACTIONS GITHUB_RUN_ID GITHUB_RUN_ATTEMPT GITHUB_JOB RUNNER_NAME
   cd "$TEST_ROOT"
 }
 

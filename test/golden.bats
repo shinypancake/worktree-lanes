@@ -16,6 +16,9 @@ setup() {
   # Create a portable temp dir with the locals config.
   LOCALS_TMP="$(mktemp -d)"
   cp "$LOCALS_CFG" "$LOCALS_TMP/worktree.config"
+  # Unset GHA env so the non-CI golden tests don't pick up CI lane logic from the runner.
+  # Tests that need CI behavior (huddle-ci.shell.txt) set GITHUB_ACTIONS=true explicitly.
+  unset GITHUB_ACTIONS GITHUB_RUN_ID GITHUB_RUN_ATTEMPT GITHUB_JOB RUNNER_NAME
 }
 
 teardown() {
