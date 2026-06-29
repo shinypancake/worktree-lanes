@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# Best-effort janitor for leaked CI Docker Compose projects on a self-hosted runner.
+# Ported from upstream; all project-specific literals replaced by project-derived
+# values (WTL_PROJECT prefix) read from the worktree config.
+# shellcheck disable=SC1091  # sourced lib files are located at runtime via WTL_ROOT
+
+set -euo pipefail
+
+# Resolve install root (same logic as bin/worktree so this script can run standalone).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  dir="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$dir/$SOURCE"
+done
+WTL_LIBEXEC="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+WTL_ROOT="$(cd "$WTL_LIBEXEC/.." && pwd)"
+
+# Load config to get WTL_PROJECT (needed for default prefix).
+# shellcheck source=../lib/config.sh
+. "$WTL_ROOT/lib/config.sh"
+if ! wtl_load_config 2>/dev/null; then
+  # If no worktree.config found we can still run if WTL_PROJECT is set externally.
+  : "${WTL_PROJECT:?runner-clean-ci: WTL_PROJECT not set and no worktree.config found}"
+fi
+WTL_PROJECT="${WTL_CFG_PROJECT:-$WTL_PROJECT}"
+
+# Derive compose file (main repo root / docker-compose.yml).
+# shellcheck source=../lib/derive.sh
+. "$WTL_ROOT/lib/derive.sh"
+# shellcheck source=../lib/emit.sh
+. "$WTL_ROOT/lib/emit.sh"
+wtl_derive
+COMPOSE_FILE="$WTL_COMPOSE_FILE"
+
+APPLY=0
+INCLUDE_RUNNING=0
+MAX_AGE_MINUTES=""
+PREFIX="${WTL_PROJECT}-ci-"
+PROJECT=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) APPLY=1 ;;
+    --include-running) INCLUDE_RUNNING=1 ;;
+    --max-age=*) MAX_AGE_MINUTES="${1#*=}" ;;
+    --prefix=*) PREFIX="${1#*=}" ;;
+    --project=*) PROJECT="${1#*=}" ;;
+    -h|--help)
+      cat <<EOF
+Usage:
+  worktree runner-clean-ci [--apply] [--include-running] [--max-age=MINUTES] [--prefix=${WTL_PROJECT}-ci-]
+  worktree runner-clean-ci [--apply] [--include-running] --project=<compose-project>
+
+Defaults:
+  - Dry-run (prints what would be cleaned)
+  - Only cleans projects with no running containers (unless --include-running or --max-age)
+
+Options:
+  --max-age=MINUTES   Treat projects with ALL containers older than MINUTES as stale and
+                      eligible for cleanup, even if they have running containers. This
+                      catches leaked stacks from cancelled/timed-out CI jobs. Projects
+                      with containers younger than MINUTES are still subject to the normal
+                      --include-running check.
+
+Examples:
+  worktree runner-clean-ci
+  worktree runner-clean-ci --apply
+  worktree runner-clean-ci --apply --max-age=120
+  worktree runner-clean-ci --apply --include-running
+  worktree runner-clean-ci --apply --include-running --project=${WTL_PROJECT}-ci-1234abcd
+EOF
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "docker not found" >&2
+  exit 1
+fi
+
+# Returns 0 (true) if ALL containers in the project are older than MAX_AGE_MINUTES.
+# Returns 1 (false) if any container is younger or if age can't be determined.
+project_is_stale() {
+  local project="$1"
+  local max_age="$2"
+  local now_epoch
+  now_epoch=$(date +%s)
+  local cutoff=$((now_epoch - max_age * 60))
+
+  local created_times
+  created_times=$(docker ps -a --filter "label=com.docker.compose.project=${project}" --format '{{.CreatedAt}}' 2>/dev/null) || return 1
+  [ -n "$created_times" ] || return 1
+
+  while IFS= read -r ts; do
+    local container_epoch
+    container_epoch=$(date -d "$ts" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S %z" "$ts" +%s 2>/dev/null) || return 1
+    if [ "$container_epoch" -gt "$cutoff" ]; then
+      return 1  # At least one container is too young
+    fi
+  done <<< "$created_times"
+  return 0  # All containers are older than max-age
+}
+
+collect_projects() {
+  {
+    docker ps -a --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null || true
+    docker volume ls --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null || true
+    docker network ls --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null || true
+  } | awk 'NF' | sort -u
+}
+
+remove_labeled_resources() {
+  local project="$1"
+  local failed_local=0
+
+  # Remove orphaned containers first (if any remain for this project).
+  mapfile -t cids < <(docker ps -a --filter "label=com.docker.compose.project=${project}" -q)
+  if [ "${#cids[@]}" -gt 0 ]; then
+    docker rm -f "${cids[@]}" >/dev/null 2>&1 || failed_local=1
+  fi
+
+  # Then remove project networks and volumes by label. These are the common
+  # sources of leaked state that accumulate on self-hosted CI runners.
+  mapfile -t nets < <(docker network ls --filter "label=com.docker.compose.project=${project}" -q)
+  if [ "${#nets[@]}" -gt 0 ]; then
+    docker network rm "${nets[@]}" >/dev/null 2>&1 || failed_local=1
+  fi
+
+  mapfile -t vols < <(docker volume ls --filter "label=com.docker.compose.project=${project}" -q)
+  if [ "${#vols[@]}" -gt 0 ]; then
+    docker volume rm "${vols[@]}" >/dev/null 2>&1 || failed_local=1
+  fi
+
+  return "$failed_local"
+}
+
+projects=()
+while IFS= read -r p; do
+  if [ -n "$PROJECT" ]; then
+    [ "$p" = "$PROJECT" ] || continue
+  else
+    [[ "$p" == ${PREFIX}* ]] || continue
+  fi
+  projects+=("$p")
+done < <(collect_projects)
+
+if [ "${#projects[@]}" -eq 0 ]; then
+  if [ -n "$PROJECT" ]; then
+    echo "No compose project found: $PROJECT"
+  else
+    echo "No compose projects found with prefix: $PREFIX"
+  fi
+  exit 0
+fi
+
+echo "Compose file: $COMPOSE_FILE"
+echo "Mode: $([ "$APPLY" -eq 1 ] && echo apply || echo dry-run)"
+if [ -n "$PROJECT" ]; then
+  echo "Project: $PROJECT"
+else
+  echo "Prefix: $PREFIX"
+fi
+[ -z "$MAX_AGE_MINUTES" ] || echo "Max age: ${MAX_AGE_MINUTES}m (running projects older than this are eligible for cleanup)"
+echo
+
+cleaned=0
+skipped_running=0
+failed=0
+
+lock_fd_open=0
+if [ "$APPLY" -eq 1 ] && [ "${GITHUB_ACTIONS:-}" = "true" ] && command -v flock >/dev/null 2>&1; then
+  # Coordinate with CI lane startup so global janitor cleanup does not race
+  # a concurrent `docker compose up` and delete containers mid-start.
+  lock_file="/tmp/${WTL_PROJECT}-ci-lane-start.lock"
+  exec 9>"$lock_file"
+  lock_fd_open=1
+  flock 9
+fi
+
+for project in "${projects[@]}"; do
+  running_count=$(docker ps --filter "label=com.docker.compose.project=${project}" -q | wc -l | tr -d ' ')
+  total_count=$(docker ps -a --filter "label=com.docker.compose.project=${project}" -q | wc -l | tr -d ' ')
+  if [ "$running_count" -gt 0 ] && [ "$INCLUDE_RUNNING" -ne 1 ]; then
+    # If --max-age is set, check whether ALL containers are older than the threshold.
+    # Stale projects from cancelled/timed-out jobs are eligible for cleanup.
+    if [ -n "$MAX_AGE_MINUTES" ] && project_is_stale "$project" "$MAX_AGE_MINUTES"; then
+      echo "STALE $project (running: $running_count, total: $total_count, all containers older than ${MAX_AGE_MINUTES}m)"
+    else
+      echo "SKIP  $project (running containers: $running_count, total: $total_count)"
+      skipped_running=$((skipped_running + 1))
+      continue
+    fi
+  fi
+
+  if [ "$APPLY" -eq 1 ]; then
+    echo "CLEAN $project (running: $running_count, total: $total_count)"
+    if docker compose -p "$project" -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1; then
+      # Best-effort follow-up cleanup in case compose metadata drift left labeled
+      # networks/volumes behind.
+      remove_labeled_resources "$project" || true
+      cleaned=$((cleaned + 1))
+    else
+      echo "WARN  compose down failed for $project; trying labeled resource cleanup" >&2
+      if remove_labeled_resources "$project"; then
+        cleaned=$((cleaned + 1))
+      else
+        echo "FAIL  $project" >&2
+        failed=$((failed + 1))
+      fi
+    fi
+  else
+    echo "WOULD CLEAN $project (running: $running_count, total: $total_count)"
+  fi
+done
+
+if [ "$lock_fd_open" -eq 1 ]; then
+  flock -u 9 || true
+  exec 9>&-
+fi
+
+echo
+echo "Summary:"
+echo "  projects_found: ${#projects[@]}"
+echo "  cleaned:         $cleaned"
+echo "  skipped_running: $skipped_running"
+echo "  failed:          $failed"
+
+[ "$failed" -eq 0 ] || exit 1

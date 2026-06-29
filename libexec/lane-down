@@ -2,7 +2,6 @@
 set -euo pipefail
 
 eval "$(worktree env --shell)"
-COMPOSE_PROJECT_NAME="$WTL_COMPOSE_PROJECT"
 
 if docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" down -v --remove-orphans "$@"; then
   exit 0
