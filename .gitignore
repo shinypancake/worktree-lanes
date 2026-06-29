@@ -2,3 +2,7 @@
 *.swp
 *.swo
 /tmp/
+
+# Runtime worktree state directories (created by the CLI, should never be committed)
+.wtl-*/
+.wtl-lane/
