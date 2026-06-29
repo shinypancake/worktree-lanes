@@ -161,7 +161,8 @@ if [ "${#projects[@]}" -eq 0 ]; then
 fi
 
 echo "Compose file: $COMPOSE_FILE"
-echo "Mode: $([ "$APPLY" -eq 1 ] && echo apply || echo dry-run)"
+if [ "$APPLY" -eq 1 ]; then _mode=apply; else _mode=dry-run; fi
+echo "Mode: $_mode"
 if [ -n "$PROJECT" ]; then
   echo "Project: $PROJECT"
 else

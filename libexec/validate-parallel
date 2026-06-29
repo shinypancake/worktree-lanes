@@ -146,8 +146,8 @@ persist_artifacts() {
   mkdir -p "$ARTIFACTS_DIR"
   rm -rf "$ARTIFACTS_DIR/logs"
   cp -R "$LOG_DIR" "$ARTIFACTS_DIR/logs" 2>/dev/null || true
-  [ -f "$LOG_DIR/wt1-env.json" ] && cp "$LOG_DIR/wt1-env.json" "$ARTIFACTS_DIR/wt1-env.json" || true
-  [ -f "$LOG_DIR/wt2-env.json" ] && cp "$LOG_DIR/wt2-env.json" "$ARTIFACTS_DIR/wt2-env.json" || true
+  if [ -f "$LOG_DIR/wt1-env.json" ]; then cp "$LOG_DIR/wt1-env.json" "$ARTIFACTS_DIR/wt1-env.json" || true; fi
+  if [ -f "$LOG_DIR/wt2-env.json" ]; then cp "$LOG_DIR/wt2-env.json" "$ARTIFACTS_DIR/wt2-env.json" || true; fi
 
   cat >"$ARTIFACTS_DIR/summary.txt" <<EOF
 mode=$MODE

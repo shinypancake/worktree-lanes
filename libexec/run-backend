@@ -15,7 +15,7 @@ CI_INFRA_STARTUP_ATTEMPTS=0
 CI_INFRA_STARTUP_MAX_ATTEMPTS=3
 CI_INFRA_JANITOR_RAN=0
 
-# shellcheck disable=SC2329  # invoked via trap
+# shellcheck disable=SC2317,SC2329  # invoked via trap (SC2317 on shellcheck<0.10, SC2329 on >=0.10)
 cleanup_compose_on_exit() {
   if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ "${WTL_INFRA_MODE:-isolated}" != "shared" ]; then
     worktree lane-down >/dev/null 2>&1 || true
