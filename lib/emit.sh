@@ -123,6 +123,7 @@ wtl_emit() {
   # emitted as WTL_* neutral aliases ONLY — never as ${pfx}_*.
   local wtl_only_keys
   wtl_only_keys=(
+    WTL_PROJECT       "$WTL_CFG_PROJECT"
     WTL_DB_USER       "$WTL_DB_USER"
     WTL_DB_PASSWORD   "$WTL_DB_PASSWORD"
     WTL_HAS_FRONTEND  "$WTL_HAS_FRONTEND"
