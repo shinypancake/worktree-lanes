@@ -18,6 +18,13 @@ wtl_load_config() {
   . "$cfg"
   : "${WTL_PROJECT:?worktree.config: WTL_PROJECT is required}"
   : "${WTL_ENV_PREFIX:?worktree.config: WTL_ENV_PREFIX is required}"
+  # Validate WTL_ENV_PREFIX is a safe shell identifier before it reaches wtl_getvar's eval.
+  # Rejects anything with $, (, ), whitespace, or other shell-special characters that would
+  # allow command substitution or expansion inside the eval "printf '%s' \"\${...}\"" call.
+  if [[ ! "$WTL_ENV_PREFIX" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "worktree.config: WTL_ENV_PREFIX must be a valid shell identifier (got: $WTL_ENV_PREFIX)" >&2
+    return 1
+  fi
   WTL_CFG_PROJECT="$WTL_PROJECT"
   WTL_CFG_PREFIX="$WTL_ENV_PREFIX"
   WTL_CFG_DB_USER="${WTL_DB_USER:-$WTL_PROJECT}"
