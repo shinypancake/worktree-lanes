@@ -44,6 +44,12 @@ setup() {
     | python3 -c 'import json,sys; json.load(sys.stdin)'
 }
 
+@test "huddle profile json byte-diff matches golden (WTL_* stripped)" {
+  out="$(cd "$HUDDLE_GIT_CTX" && WTL_FAKE_ROOT="$HUDDLE_REPO" "$WORKTREE_CMD" env --json \
+    | sed 's/,"WTL_[^"]*":"[^"]*"//g; s/{"WTL_[^"]*":"[^"]*",//g')"
+  diff <(printf '%s\n' "$out") "$GOLDEN_DIR/huddle-main.json.txt"
+}
+
 @test "locals profile main golden is stable" {
   out1="$(cd "$WTL_REPO/.wtl-locals-test" && WTL_FAKE_ROOT="$WTL_REPO" "$WORKTREE_CMD" env --shell)"
   diff <(printf '%s\n' "$out1") "$GOLDEN_DIR/locals-main.shell.txt"
