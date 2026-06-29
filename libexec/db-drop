@@ -57,6 +57,10 @@ _drop_db() {
     printf 'DRYRUN: PGPASSWORD=*** dropdb --host=%s --port=%s --username=%s --if-exists %s\n' \
       "$PG_HOST" "$PG_PORT" "$WTL_DB_USER" "$dbname"
   else
+    command -v dropdb >/dev/null 2>&1 || {
+      echo "worktree db-drop: 'dropdb' not found on PATH — install the Postgres client tools (e.g. 'brew install libpq && brew link --force libpq')." >&2
+      exit 1
+    }
     PGPASSWORD="$WTL_DB_PASSWORD" dropdb \
       --host="$PG_HOST" --port="$PG_PORT" \
       --username="$WTL_DB_USER" \

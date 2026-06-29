@@ -29,7 +29,7 @@ case "$cmd" in
     wtl_emit "$@"
     ;;
   version|--version|-v)
-    cat "$WTL_ROOT/VERSION"
+    if [ -f "$WTL_ROOT/VERSION" ]; then cat "$WTL_ROOT/VERSION"; else echo "unknown"; fi
     ;;
   help|-h|--help)
     echo "usage: worktree <env|test-backend|lane-up|lane-down|...> [args]"

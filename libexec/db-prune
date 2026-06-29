@@ -96,6 +96,10 @@ _list_candidate_dbs() {
   if [ -n "${WTL_PRUNE_DB_LIST_CMD:-}" ]; then
     eval "$WTL_PRUNE_DB_LIST_CMD"
   else
+    command -v psql >/dev/null 2>&1 || {
+      echo "worktree db-prune: 'psql' not found on PATH — install the Postgres client tools (e.g. 'brew install libpq && brew link --force libpq') to enumerate databases." >&2
+      exit 1
+    }
     local pattern="${PROJECT}_test_%"
     PGPASSWORD="$WTL_DB_PASSWORD" psql \
       --host="$PG_HOST" --port="$PG_PORT" \
