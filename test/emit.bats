@@ -33,3 +33,27 @@ worktree_env_json() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"export WTL_TEST_DB_NAME=gotogether_test_"* ]]
 }
+
+@test "--infra-mode=shared flips WTL_INFRA_DB_HOST to host.docker.internal" {
+  root="$(setup_repo_root "$BATS_TEST_DIRNAME/fixtures/huddle.worktree.config")"
+  run bash -c "cd '$root' && WTL_ROOT='$BATS_TEST_DIRNAME/..' '$BATS_TEST_DIRNAME/../bin/worktree' env --shell --infra-mode=shared"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export WTL_INFRA_DB_HOST=host.docker.internal"* ]]
+  [[ "$output" == *"export WTL_INFRA_MODE=shared"* ]]
+}
+
+@test "--infra-mode=shared sets WTL_DB_TCP_PORT to 15432 (shared postgres port)" {
+  root="$(setup_repo_root "$BATS_TEST_DIRNAME/fixtures/huddle.worktree.config")"
+  run bash -c "cd '$root' && WTL_ROOT='$BATS_TEST_DIRNAME/..' '$BATS_TEST_DIRNAME/../bin/worktree' env --shell --infra-mode=shared"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export WTL_DB_TCP_PORT=15432"* ]]
+}
+
+@test "worktree invoked through symlink still resolves WTL_ROOT" {
+  symdir="$(mktemp -d)"
+  ln -s "$BATS_TEST_DIRNAME/../bin/worktree" "$symdir/worktree"
+  root="$(setup_repo_root "$BATS_TEST_DIRNAME/fixtures/huddle.worktree.config")"
+  run bash -c "cd '$root' && '$symdir/worktree' help"
+  [ "$status" -eq 0 ]
+  rm -rf "$symdir"
+}
