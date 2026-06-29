@@ -345,9 +345,9 @@ run_lane_up_single_wt() {
     (
       cd "$wt"
       echo "cwd: $wt"
-      echo "cmd: worktree lane-up"
+      echo "cmd: worktree lane-up --detach"
       echo
-      worktree lane-up
+      worktree lane-up --detach
     ) 2>&1 | tee "$up_log" | tee -a "$logfile" | sed -u "s/^/[${wt_label} lane-up] /" || true
     lane_rc=${PIPESTATUS[0]}
     set -e
