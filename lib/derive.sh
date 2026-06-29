@@ -31,7 +31,14 @@ wtl_derive() {
     WTL_WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)
   fi
 
-  WTL_MAIN_REPO=$(git worktree list --porcelain | awk '/^worktree/{print $2; exit}')
+  # Allow WTL_FAKE_MAIN_REPO to override the main-repo path for CI portability tests.
+  # When set, skip the git worktree list shell-out entirely — no real git repo needed.
+  # When unset, behavior is unchanged (production unaffected).
+  if [ -n "${WTL_FAKE_MAIN_REPO:-}" ]; then
+    WTL_MAIN_REPO="$WTL_FAKE_MAIN_REPO"
+  else
+    WTL_MAIN_REPO=$(git worktree list --porcelain | awk '/^worktree/{print $2; exit}')
+  fi
   WTL_COMPOSE_FILE="$WTL_MAIN_REPO/docker-compose.yml"
 
   # CI lane key: honor neutral override first, then prefixed form, then auto-derive from GHA env.
@@ -170,8 +177,10 @@ wtl_derive() {
   WTL_WEBAUTHN_RP_ORIGIN="$WTL_FRONTEND_URL"
   WTL_WEBAUTHN_RP_ID="$WTL_HOST_LOOPBACK"
 
-  WTL_CONTAINER_UID=$(id -u)
-  WTL_CONTAINER_GID=$(id -g)
+  # Allow WTL_FAKE_CONTAINER_UID/GID overrides for golden parity tests on CI
+  # (id -u/id -g vary by OS/runner; override pins them to the captured values).
+  WTL_CONTAINER_UID="${WTL_FAKE_CONTAINER_UID:-$(id -u)}"
+  WTL_CONTAINER_GID="${WTL_FAKE_CONTAINER_GID:-$(id -g)}"
 
   # Frontend container UID/GID (emitted when WTL_CFG_HAS_FRONTEND=1)
   local frontend_uid_input; frontend_uid_input="$(wtl_getvar "${WTL_CFG_PREFIX}_FRONTEND_CONTAINER_UID")"

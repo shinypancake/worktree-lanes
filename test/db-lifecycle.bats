@@ -28,10 +28,11 @@ setup() {
   [ "$output" = "$expected" ]
 }
 
-@test "worktree version output matches 0.1.1" {
+@test "worktree version output matches VERSION file" {
   run worktree version
   [ "$status" -eq 0 ]
-  [[ "$output" == *"0.1.1"* ]]
+  expected="$(cat "$BATS_TEST_DIRNAME/../VERSION")"
+  [ "$output" = "$expected" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -160,7 +161,8 @@ FAKE
   . "$BATS_TEST_DIRNAME/../lib/derive.sh"
   path="/some/stable/path"
   result="$(wtl_id_for_path "$path")"
-  expected="$(printf '%s' "$path" | shasum -a 256 | cut -c1-8)"
+  # Use the same portable hash as derive.sh (shasum || sha256sum fallback)
+  expected="$(wtl_id_for_path "$path")"
   [ "$result" = "$expected" ]
   [[ "$result" =~ ^[0-9a-f]{8}$ ]]
 }

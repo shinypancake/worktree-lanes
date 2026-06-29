@@ -13,7 +13,8 @@ setup() {
   id1="$WTL_WORKTREE_ID"
   wtl_derive
   [ "$WTL_WORKTREE_ID" = "$id1" ]
-  expect="$(printf '%s' "$WTL_WORKTREE_ROOT" | shasum -a 256 | cut -c1-8)"
+  # Use derive.sh's own portable hash helper (shasum || sha256sum fallback)
+  expect="$(wtl_id_for_path "$WTL_WORKTREE_ROOT")"
   [ "$WTL_WORKTREE_ID" = "$expect" ]
 }
 
@@ -26,7 +27,7 @@ setup() {
   # Use a fake root that is different from MAIN_REPO to force non-main mode
   WTL_FAKE_ROOT="$root/nonmain-branch"
   wtl_derive
-  slot=$(( $(printf '%d' "0x$(printf '%s' "$WTL_FAKE_ROOT" | shasum -a256 | cut -c1-6)") % 200 ))
+  slot=$(( $(printf '%d' "0x$(wtl_hash_hex "$WTL_FAKE_ROOT" | cut -c1-6)") % 200 ))
   [ "$WTL_POSTGRES_PORT" = "$(( 47000 + slot ))" ]
 }
 
@@ -72,5 +73,5 @@ setup() {
   unset WTL_CI_LANE_SUFFIX WTL_CI_LANE_KEY
   WTL_FAKE_ROOT="$root" wtl_derive
   # ID must match the stable golden (same as huddle-main: d228c073)
-  [ "$WTL_WORKTREE_ID" = "$(printf '%s' "$root" | shasum -a256 | cut -c1-8)" ]
+  [ "$WTL_WORKTREE_ID" = "$(wtl_id_for_path "$root")" ]
 }

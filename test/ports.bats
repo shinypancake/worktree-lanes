@@ -6,6 +6,10 @@ setup() {
   TEST_ROOT="$(setup_repo_root "$BATS_TEST_DIRNAME/fixtures/locals.worktree.config")"
   export WTL_ROOT="$BATS_TEST_DIRNAME/.."
   export PATH="$BATS_TEST_DIRNAME/../bin:$PATH"
+  # WTL_FAKE_ROOT + WTL_FAKE_MAIN_REPO == same path → IS_MAIN=1 deterministically
+  # (avoids relying on git worktree list on the CI runner).
+  export WTL_FAKE_ROOT="$TEST_ROOT"
+  export WTL_FAKE_MAIN_REPO="$TEST_ROOT"
   cd "$TEST_ROOT"
 }
 
