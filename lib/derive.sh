@@ -25,9 +25,11 @@ wtl_derive() {
   WTL_MAIN_REPO=$(git worktree list --porcelain | awk '/^worktree/{print $2; exit}')
   WTL_COMPOSE_FILE="$WTL_MAIN_REPO/docker-compose.yml"
 
-  # CI lane key: explicit override or auto-derived from GHA env
-  local ci_lane_key_input; ci_lane_key_input="$(wtl_getvar "${WTL_CFG_PREFIX}_CI_LANE_KEY")"
-  local ci_lane_suffix_input; ci_lane_suffix_input="$(wtl_getvar "${WTL_CFG_PREFIX}_CI_LANE_SUFFIX")"
+  # CI lane key: honor neutral override first, then prefixed form, then auto-derive from GHA env.
+  # The neutral WTL_CI_LANE_SUFFIX/WTL_CI_LANE_KEY vars are exported by libexec scripts on retry
+  # so re-executing `worktree env` picks up the new suffix and produces a different WORKTREE_ID.
+  local ci_lane_key_input; ci_lane_key_input="${WTL_CI_LANE_KEY:-$(wtl_getvar "${WTL_CFG_PREFIX}_CI_LANE_KEY")}"
+  local ci_lane_suffix_input; ci_lane_suffix_input="${WTL_CI_LANE_SUFFIX:-$(wtl_getvar "${WTL_CFG_PREFIX}_CI_LANE_SUFFIX")}"
   WTL_CI_LANE_KEY="$ci_lane_key_input"
   if [ -z "$WTL_CI_LANE_KEY" ] && [ "${GITHUB_ACTIONS:-}" = "true" ]; then
     WTL_CI_LANE_KEY="gha-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-job}-${RUNNER_NAME:-runner}"
