@@ -45,8 +45,10 @@ STARTED_AT_UTC=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 SHARED_INFRA_WAS_RUNNING=0
 
 # Detect shared infra using config-driven project name (not hardcoded brand).
-eval "$(worktree env --shell --infra-mode=shared)"
-if docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q 2>/dev/null | grep -q .; then
+# Use a subshell so --infra-mode=shared does not pollute the outer env with
+# GOTOGETHER_INFRA_MODE=shared (which would cause the backend-test step to
+# use shared infra instead of isolated, triggering port conflicts).
+if (eval "$(worktree env --shell --infra-mode=shared)" &&     docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q 2>/dev/null | grep -q .) 2>/dev/null; then
   SHARED_INFRA_WAS_RUNNING=1
 fi
 if [ "${WTL_VALIDATE_ALLOW_DIRTY:-0}" != "1" ] && [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
