@@ -3,6 +3,7 @@
 #
 # Local mode keeps the fast non-main worktree symlink behavior. CI mode always
 # runs deterministic installs and never reuses another worktree's node_modules.
+# shellcheck disable=SC1091  # sourced lib files are located at runtime via _WTL_ROOT
 
 set -euo pipefail
 
@@ -42,7 +43,18 @@ done
 # flock is Linux-only; fall back to direct execution on macOS (no ETXTBSY risk there).
 WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)
 MAIN_REPO=$(git worktree list --porcelain 2>/dev/null | awk '/^worktree/{print $2; exit}')
-NPM_LOCK="/tmp/${WORKTREE_ROOT##*/}-npm-install.lock"
+
+# Key the lock per-project (not per-worktree) so all worktrees for the same project
+# serialize on the same runner instead of racing to install node_modules concurrently.
+# Source worktree env to get WTL_PROJECT; fall back to "wtl" if config is unavailable.
+_WTL_PROJECT="${WTL_PROJECT:-}"
+if [ -z "$_WTL_PROJECT" ]; then
+  _WTL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  if . "$_WTL_ROOT/lib/config.sh" 2>/dev/null && wtl_load_config 2>/dev/null; then
+    _WTL_PROJECT="$WTL_CFG_PROJECT"
+  fi
+fi
+NPM_LOCK="/tmp/${_WTL_PROJECT:-wtl}-npm-install.lock"
 
 if command -v flock >/dev/null 2>&1; then
   npm_install() { flock -w 300 "$NPM_LOCK" bash -c "$1"; }
