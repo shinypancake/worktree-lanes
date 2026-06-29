@@ -14,6 +14,15 @@ wtl_hash_hex() {
   fi
 }
 
+# wtl_id_for_path PATH — return the 8-hex worktree id for a given absolute path.
+# Mirrors the non-CI-lane branch of wtl_derive: sha256(path)[0:8].
+# Used by db-prune to enumerate live worktree ids without spawning subprocesses.
+wtl_id_for_path() {
+  local path="$1"
+  local hash; hash=$(wtl_hash_hex "$path")
+  printf '%s' "${hash:0:8}"
+}
+
 wtl_derive() {
   # Allow WTL_FAKE_ROOT to override the worktree root for golden parity tests.
   if [ -n "${WTL_FAKE_ROOT:-}" ]; then

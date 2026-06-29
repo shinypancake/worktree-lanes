@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# Drop per-worktree databases whose worktree no longer exists (orphaned DBs).
+# Dry-run by default; pass --apply to actually drop.
+# Compatible with bash 3.2+ (macOS system bash).
+# shellcheck disable=SC1091  # sourced lib files are located at runtime via WTL_ROOT
+
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  dir="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$dir/$SOURCE"
+done
+WTL_LIBEXEC="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+WTL_ROOT="$(cd "$WTL_LIBEXEC/.." && pwd)"
+
+. "$WTL_ROOT/lib/config.sh"
+. "$WTL_ROOT/lib/derive.sh"
+. "$WTL_ROOT/lib/emit.sh"
+wtl_load_config
+wtl_derive
+
+APPLY=0
+INCLUDE_DEV=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply)  APPLY=1 ;;
+    --dev)    INCLUDE_DEV=1 ;;
+    -h|--help)
+      cat <<EOF
+Usage: worktree db-prune [--apply] [--dev]
+
+Identify per-worktree test databases (${WTL_CFG_PROJECT}_test_<id>) whose
+worktree no longer exists, and drop them.
+
+Dry-run by default — prints what WOULD be dropped.
+Pass --apply to actually execute the drops.
+
+With --dev, also prune per-worktree dev databases (${WTL_CFG_PROJECT}_dev_<id>).
+
+Never drops bare ${WTL_CFG_PROJECT}_test or ${WTL_CFG_PROJECT}_development.
+
+Testability hooks (for tests only — do not rely on these in production):
+  WTL_PRUNE_DB_LIST_CMD        override command to list candidate DB names
+  WTL_PRUNE_WORKTREE_LIST_CMD  override command that emits worktree paths
+EOF
+      exit 0
+      ;;
+    *)
+      echo "worktree db-prune: unknown arg: $1" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+PG_HOST="127.0.0.1"
+PG_PORT="$WTL_MAIN_POSTGRES_PORT"
+PROJECT="$WTL_CFG_PROJECT"
+
+# --- enumerate live worktree ids ---
+# Build a newline-separated string of 8-hex ids for all live worktrees.
+# Default: parse `git worktree list --porcelain` from the main repo.
+# Override: WTL_PRUNE_WORKTREE_LIST_CMD emits one absolute path per line.
+_build_live_id_list() {
+  if [ -n "${WTL_PRUNE_WORKTREE_LIST_CMD:-}" ]; then
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      wtl_id_for_path "$path"
+    done < <(eval "$WTL_PRUNE_WORKTREE_LIST_CMD")
+  else
+    local line
+    while IFS= read -r line; do
+      if [[ "$line" == worktree\ * ]]; then
+        local path="${line#worktree }"
+        wtl_id_for_path "$path"
+      fi
+    done < <(git -C "$WTL_MAIN_REPO" worktree list --porcelain 2>/dev/null)
+  fi
+}
+
+live_id_list="$(_build_live_id_list)"
+
+# Check if a given 8-hex id is in the live set.
+_is_live_id() {
+  local id="$1"
+  printf '%s\n' "$live_id_list" | grep -qxF "$id"
+}
+
+# --- list candidate databases ---
+# Default: query pg_database for names matching the hashed per-worktree pattern.
+# Override: WTL_PRUNE_DB_LIST_CMD emits one DB name per line.
+_list_candidate_dbs() {
+  if [ -n "${WTL_PRUNE_DB_LIST_CMD:-}" ]; then
+    eval "$WTL_PRUNE_DB_LIST_CMD"
+  else
+    local pattern="${PROJECT}_test_%"
+    PGPASSWORD="$WTL_DB_PASSWORD" psql \
+      --host="$PG_HOST" --port="$PG_PORT" \
+      --username="$WTL_DB_USER" \
+      --dbname=postgres \
+      -Atc "SELECT datname FROM pg_database WHERE datname LIKE '${pattern}'"
+    if [ "$INCLUDE_DEV" -eq 1 ]; then
+      local dev_pattern="${PROJECT}_dev_%"
+      PGPASSWORD="$WTL_DB_PASSWORD" psql \
+        --host="$PG_HOST" --port="$PG_PORT" \
+        --username="$WTL_DB_USER" \
+        --dbname=postgres \
+        -Atc "SELECT datname FROM pg_database WHERE datname LIKE '${dev_pattern}'"
+    fi
+  fi
+}
+
+_drop_db() {
+  local dbname="$1"
+  PGPASSWORD="$WTL_DB_PASSWORD" dropdb \
+    --host="$PG_HOST" --port="$PG_PORT" \
+    --username="$WTL_DB_USER" \
+    --if-exists \
+    "$dbname"
+}
+
+would_drop=0
+dropped=0
+kept=0
+
+while IFS= read -r dbname; do
+  [ -n "$dbname" ] || continue
+
+  # Extract the id suffix — the token after the last underscore.
+  # DB names: project_test_XXXXXXXX or project_dev_XXXXXXXX
+  local_id="${dbname##*_}"
+
+  # Guard: skip bare (non-hashed) DBs — suffix would be "test" or "development"
+  if [[ ! "$local_id" =~ ^[0-9a-f]{8}$ ]]; then
+    continue
+  fi
+
+  if _is_live_id "$local_id"; then
+    kept=$((kept + 1))
+    continue
+  fi
+
+  # Orphaned
+  if [ "$APPLY" -eq 1 ]; then
+    echo "Dropping: $dbname"
+    _drop_db "$dbname"
+    dropped=$((dropped + 1))
+  else
+    echo "Would drop: $dbname"
+    would_drop=$((would_drop + 1))
+  fi
+done < <(_list_candidate_dbs)
+
+echo
+if [ "$APPLY" -eq 1 ]; then
+  echo "Summary: dropped=$dropped kept=$kept"
+else
+  echo "Summary: would_drop=$would_drop kept=$kept (dry-run; pass --apply to execute)"
+fi

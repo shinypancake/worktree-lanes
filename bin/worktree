@@ -28,6 +28,9 @@ case "$cmd" in
     wtl_derive
     wtl_emit "$@"
     ;;
+  version|--version|-v)
+    cat "$WTL_ROOT/VERSION"
+    ;;
   help|-h|--help)
     echo "usage: worktree <env|test-backend|lane-up|lane-down|...> [args]"
     ;;

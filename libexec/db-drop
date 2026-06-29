@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Drop this worktree's per-worktree test (and optionally dev) database.
+# Reads WTL_TEST_DB_NAME, WTL_DEV_DB_NAME, WTL_DB_USER, WTL_DB_PASSWORD,
+# and WTL_MAIN_POSTGRES_PORT from the worktree env.
+# shellcheck disable=SC1091  # sourced lib files are located at runtime via WTL_ROOT
+
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  dir="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$dir/$SOURCE"
+done
+WTL_LIBEXEC="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+WTL_ROOT="$(cd "$WTL_LIBEXEC/.." && pwd)"
+
+. "$WTL_ROOT/lib/config.sh"
+. "$WTL_ROOT/lib/derive.sh"
+. "$WTL_ROOT/lib/emit.sh"
+wtl_load_config
+wtl_derive
+
+DROP_DEV=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dev)  DROP_DEV=1 ;;
+    -h|--help)
+      cat <<EOF
+Usage: worktree db-drop [--dev]
+
+Drop this worktree's per-worktree test database (WTL_TEST_DB_NAME).
+With --dev, also drop the dev database (WTL_DEV_DB_NAME).
+
+Under WTL_DRYRUN=1, prints the drop command(s) instead of executing.
+
+Options:
+  --dev    Also drop the dev database
+EOF
+      exit 0
+      ;;
+    *)
+      echo "worktree db-drop: unknown arg: $1" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+PG_HOST="127.0.0.1"
+PG_PORT="$WTL_MAIN_POSTGRES_PORT"
+
+_drop_db() {
+  local dbname="$1"
+  if [ "${WTL_DRYRUN:-0}" = "1" ]; then
+    printf 'DRYRUN: PGPASSWORD=*** dropdb --host=%s --port=%s --username=%s --if-exists %s\n' \
+      "$PG_HOST" "$PG_PORT" "$WTL_DB_USER" "$dbname"
+  else
+    PGPASSWORD="$WTL_DB_PASSWORD" dropdb \
+      --host="$PG_HOST" --port="$PG_PORT" \
+      --username="$WTL_DB_USER" \
+      --if-exists \
+      "$dbname"
+    echo "Dropped: $dbname"
+  fi
+}
+
+_drop_db "$WTL_TEST_DB_NAME"
+
+if [ "$DROP_DEV" -eq 1 ]; then
+  _drop_db "$WTL_DEV_DB_NAME"
+fi
