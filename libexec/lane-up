@@ -3,6 +3,9 @@
 
 set -euo pipefail
 
+# shellcheck source=lib/ci_compose_retry.sh
+. "$WTL_ROOT/lib/ci_compose_retry.sh"
+
 WITH_SIDEKIQ=1
 DETACH=0
 BUILD_MODE=""
@@ -27,6 +30,12 @@ if [ "${GITHUB_ACTIONS:-}" != "true" ]; then
 fi
 
 run_compose_up_detached() {
+  local -a compose_args=()
+  if [ -n "$BUILD_MODE" ]; then
+    compose_args+=("$BUILD_MODE")
+  fi
+  compose_args+=("$@")
+
   if [ "${GITHUB_ACTIONS:-}" = "true" ] && command -v flock >/dev/null 2>&1; then
     # Prevent a check-then-bind race between concurrent CI lane startups on the same host.
     local lock_file="/tmp/${WTL_PROJECT}-ci-lane-start.lock"
@@ -36,11 +45,11 @@ run_compose_up_detached() {
     if ! docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q | grep -q .; then
       worktree env --check-ports --infra-mode=isolated >/dev/null
     fi
-    docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d ${BUILD_MODE:+$BUILD_MODE} "$@"
+    wtl_compose_up_with_ci_retry "lane-up" -- "${compose_args[@]}"
     flock -u 9
     exec 9>&-
   else
-    docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d ${BUILD_MODE:+$BUILD_MODE} "$@"
+    docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" up -d "${compose_args[@]}"
   fi
 }
 
