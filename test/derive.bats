@@ -23,7 +23,7 @@ setup() {
 
 @test "test db name is always per-id" {
   wtl_derive
-  [ "$WTL_TEST_DB_NAME" = "gotogether_test_${WTL_WORKTREE_ID}" ]
+  [ "$WTL_TEST_DB_NAME" = "huddle_test_${WTL_WORKTREE_ID}" ]
 }
 
 @test "non-main postgres port = base + slot" {
@@ -47,7 +47,7 @@ setup() {
     cfg_root="$(setup_repo_root "$BATS_TEST_DIRNAME/fixtures/huddle.worktree.config")"
     cd "$cfg_root"
     wtl_load_config
-    unset WTL_CI_LANE_SUFFIX WTL_CI_LANE_KEY GOTOGETHER_CI_LANE_SUFFIX GOTOGETHER_CI_LANE_KEY
+    unset WTL_CI_LANE_SUFFIX WTL_CI_LANE_KEY HUDDLE_CI_LANE_SUFFIX HUDDLE_CI_LANE_KEY
     GITHUB_ACTIONS=true GITHUB_RUN_ID=99 GITHUB_RUN_ATTEMPT=1 GITHUB_JOB=job RUNNER_NAME=runner \
       WTL_FAKE_ROOT="$cfg_root" wtl_derive
     printf '%s' "$WTL_WORKTREE_ID"
@@ -60,7 +60,7 @@ setup() {
     cfg_root="$(setup_repo_root "$BATS_TEST_DIRNAME/fixtures/huddle.worktree.config")"
     cd "$cfg_root"
     wtl_load_config
-    unset GOTOGETHER_CI_LANE_SUFFIX GOTOGETHER_CI_LANE_KEY
+    unset HUDDLE_CI_LANE_SUFFIX HUDDLE_CI_LANE_KEY
     WTL_CI_LANE_SUFFIX=retry1 \
       GITHUB_ACTIONS=true GITHUB_RUN_ID=99 GITHUB_RUN_ATTEMPT=1 GITHUB_JOB=job RUNNER_NAME=runner \
       WTL_FAKE_ROOT="$cfg_root" wtl_derive
@@ -72,7 +72,7 @@ setup() {
 }
 
 @test "WTL_CI_LANE_SUFFIX neutral override does NOT affect golden parity (no suffix set)" {
-  # Parity guard: when the neutral overrides are unset, the prefixed GOTOGETHER_* output is unchanged.
+  # Parity guard: when the neutral overrides are unset, the prefixed HUDDLE_* output is unchanged.
   unset WTL_CI_LANE_SUFFIX WTL_CI_LANE_KEY
   WTL_FAKE_ROOT="$root" wtl_derive
   # ID must match the stable golden (same as huddle-main: d228c073)

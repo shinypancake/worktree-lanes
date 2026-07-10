@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # Golden parity tests: generic CLI must reproduce Huddle's captured output byte-for-byte
-# (for GOTOGETHER_* prefixed lines; WTL_* neutral aliases are stripped before diffing).
+# (for HUDDLE_* prefixed lines; WTL_* neutral aliases are stripped before diffing).
 
 HUDDLE_REPO=/Users/logan/repos/huddle
 WTL_REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -28,45 +28,45 @@ teardown() {
 # Common env for huddle golden tests:
 #   WTL_FAKE_MAIN_REPO  — skips git worktree list, injects the captured main-repo path
 #   WTL_FAKE_CONTAINER_UID/GID — pins id -u/id -g to captured macOS values
-#   GOTOGETHER_FRONTEND_CONTAINER_UID/GID=0 — reproduces the Darwin local-dev override
+#   HUDDLE_FRONTEND_CONTAINER_UID/GID=0 — reproduces the Darwin local-dev override
 _huddle_env() {
   printf '%s' \
     "WTL_FAKE_MAIN_REPO=$HUDDLE_REPO " \
     "WTL_FAKE_CONTAINER_UID=501 " \
     "WTL_FAKE_CONTAINER_GID=20 " \
-    "GOTOGETHER_FRONTEND_CONTAINER_UID=0 " \
-    "GOTOGETHER_FRONTEND_CONTAINER_GID=0"
+    "HUDDLE_FRONTEND_CONTAINER_UID=0 " \
+    "HUDDLE_FRONTEND_CONTAINER_GID=0"
 }
 
-@test "huddle profile reproduces captured GOTOGETHER_* env exactly (shell, main)" {
+@test "huddle profile reproduces captured HUDDLE_* env exactly (shell, main)" {
   out="$(cd "$HUDDLE_TMP" && \
     WTL_FAKE_MAIN_REPO="$HUDDLE_REPO" \
     WTL_FAKE_ROOT="$HUDDLE_REPO" \
     WTL_FAKE_CONTAINER_UID=501 \
     WTL_FAKE_CONTAINER_GID=20 \
-    GOTOGETHER_FRONTEND_CONTAINER_UID=0 \
-    GOTOGETHER_FRONTEND_CONTAINER_GID=0 \
+    HUDDLE_FRONTEND_CONTAINER_UID=0 \
+    HUDDLE_FRONTEND_CONTAINER_GID=0 \
     "$WORKTREE_CMD" env --shell \
     | grep -v '^export WTL_')"
   diff <(printf '%s\n' "$out") "$GOLDEN_DIR/huddle-main.shell.txt"
 }
 
-@test "huddle profile reproduces captured GOTOGETHER_* env exactly (shell, non-main)" {
+@test "huddle profile reproduces captured HUDDLE_* env exactly (shell, non-main)" {
   out="$(cd "$HUDDLE_TMP" && \
     WTL_FAKE_MAIN_REPO="$HUDDLE_REPO" \
     WTL_FAKE_ROOT=/private/tmp/hud-wt-parity \
     WTL_FAKE_CONTAINER_UID=501 \
     WTL_FAKE_CONTAINER_GID=20 \
-    GOTOGETHER_FRONTEND_CONTAINER_UID=0 \
-    GOTOGETHER_FRONTEND_CONTAINER_GID=0 \
+    HUDDLE_FRONTEND_CONTAINER_UID=0 \
+    HUDDLE_FRONTEND_CONTAINER_GID=0 \
     "$WORKTREE_CMD" env --shell \
     | grep -v '^export WTL_')"
   diff <(printf '%s\n' "$out") "$GOLDEN_DIR/huddle-nonmain.shell.txt"
 }
 
-@test "huddle profile reproduces captured GOTOGETHER_* env exactly (shell, CI lane)" {
+@test "huddle profile reproduces captured HUDDLE_* env exactly (shell, CI lane)" {
   out="$(cd "$HUDDLE_TMP" && \
-    GITHUB_ACTIONS=true GOTOGETHER_CI_LANE_KEY=gha-1-1-job-runner \
+    GITHUB_ACTIONS=true HUDDLE_CI_LANE_KEY=gha-1-1-job-runner \
     WTL_FAKE_MAIN_REPO="$HUDDLE_REPO" \
     WTL_FAKE_ROOT="$HUDDLE_REPO" \
     WTL_FAKE_CONTAINER_UID=501 \
@@ -82,8 +82,8 @@ _huddle_env() {
     WTL_FAKE_ROOT="$HUDDLE_REPO" \
     WTL_FAKE_CONTAINER_UID=501 \
     WTL_FAKE_CONTAINER_GID=20 \
-    GOTOGETHER_FRONTEND_CONTAINER_UID=0 \
-    GOTOGETHER_FRONTEND_CONTAINER_GID=0 \
+    HUDDLE_FRONTEND_CONTAINER_UID=0 \
+    HUDDLE_FRONTEND_CONTAINER_GID=0 \
     "$WORKTREE_CMD" env --json \
     | python3 -c 'import json,sys; json.load(sys.stdin)'
 }
@@ -94,8 +94,8 @@ _huddle_env() {
     WTL_FAKE_ROOT="$HUDDLE_REPO" \
     WTL_FAKE_CONTAINER_UID=501 \
     WTL_FAKE_CONTAINER_GID=20 \
-    GOTOGETHER_FRONTEND_CONTAINER_UID=0 \
-    GOTOGETHER_FRONTEND_CONTAINER_GID=0 \
+    HUDDLE_FRONTEND_CONTAINER_UID=0 \
+    HUDDLE_FRONTEND_CONTAINER_GID=0 \
     "$WORKTREE_CMD" env --json \
     | sed 's/,"WTL_[^"]*":"[^"]*"//g; s/{"WTL_[^"]*":"[^"]*",//g')"
   diff <(printf '%s\n' "$out") "$GOLDEN_DIR/huddle-main.json.txt"

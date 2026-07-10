@@ -70,7 +70,7 @@ if [ "\$1" = "compose" ]; then
     if [ "\$arg" = "up" ]; then
       n=\$(( \$(cat "$ATTEMPTS_FILE") + 1 ))
       echo "\$n" > "$ATTEMPTS_FILE"
-      echo "Error: pull access denied for gotogether/backend, repository does not exist" >&2
+      echo "Error: pull access denied for huddle/backend, repository does not exist" >&2
       exit 1
     fi
     if [ "\$arg" = "down" ]; then
@@ -95,7 +95,7 @@ EOF
 
 @test "wtl_is_retryable_compose_error rejects an unrelated error" {
   logfile="$(mktemp)"
-  echo "Error: pull access denied for gotogether/backend" > "$logfile"
+  echo "Error: pull access denied for huddle/backend" > "$logfile"
   run wtl_is_retryable_compose_error "$logfile"
   [ "$status" -eq 1 ]
   rm -f "$logfile"
