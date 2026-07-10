@@ -17,7 +17,7 @@ worktree_env_json() {
 @test "emits both prefixed and neutral names in shell mode" {
   run worktree_env_shell "$BATS_TEST_DIRNAME/fixtures/huddle.worktree.config"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"export GOTOGETHER_TEST_DB_NAME="* ]]
+  [[ "$output" == *"export HUDDLE_TEST_DB_NAME="* ]]
   [[ "$output" == *"export WTL_TEST_DB_NAME="* ]]
 }
 
@@ -25,13 +25,13 @@ worktree_env_json() {
   run worktree_env_json "$BATS_TEST_DIRNAME/fixtures/huddle.worktree.config"
   [ "$status" -eq 0 ]
   echo "$output" | python3 -c 'import json,sys; json.load(sys.stdin)'
-  [[ "$output" == *'"GOTOGETHER_TEST_DB_NAME"'* ]]
+  [[ "$output" == *'"HUDDLE_TEST_DB_NAME"'* ]]
 }
 
 @test "emits WTL_TEST_DB_NAME neutral alias" {
   run worktree_env_shell "$BATS_TEST_DIRNAME/fixtures/huddle.worktree.config"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"export WTL_TEST_DB_NAME=gotogether_test_"* ]]
+  [[ "$output" == *"export WTL_TEST_DB_NAME=huddle_test_"* ]]
 }
 
 @test "--infra-mode=shared flips WTL_INFRA_DB_HOST to host.docker.internal" {
