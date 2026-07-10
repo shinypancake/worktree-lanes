@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# worktree self-update — update a git-based install in place to a release tag.
+# No-op-safe: reports when already up to date. For Homebrew installs it points
+# you at `brew upgrade` instead (the Cellar checkout is not a git repo we own).
+set -euo pipefail
+
+VERSION=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --version) VERSION="${2:?--version needs a value}"; shift 2 ;;
+    --version=*) VERSION="${1#*=}"; shift ;;
+    -h|--help) echo "usage: worktree self-update [--version <tag>]"; exit 0 ;;
+    *) echo "self-update: unknown argument '$1'" >&2; exit 2 ;;
+  esac
+done
+
+: "${WTL_ROOT:?self-update must be invoked via the worktree launcher}"
+
+if [ ! -d "$WTL_ROOT/.git" ]; then
+  echo "worktree is not a git-based install ($WTL_ROOT)." >&2
+  echo "If you installed via Homebrew, update with:" >&2
+  echo "  brew upgrade shinypancake/tap/worktree-lanes" >&2
+  exit 1
+fi
+
+old="$(cat "$WTL_ROOT/VERSION" 2>/dev/null || echo unknown)"
+git -C "$WTL_ROOT" fetch --tags --force --quiet origin
+if [ -z "$VERSION" ]; then
+  VERSION="$(git -C "$WTL_ROOT" for-each-ref --sort=-v:refname --count=1 --format='%(refname:short)' refs/tags)"
+fi
+[ -n "$VERSION" ] || { echo "self-update: no release tags found to update to" >&2; exit 1; }
+
+git -C "$WTL_ROOT" checkout --quiet "$VERSION"
+new="$(cat "$WTL_ROOT/VERSION" 2>/dev/null || echo unknown)"
+
+if [ "$old" = "$new" ]; then
+  echo "worktree already up to date (version $new)"
+else
+  echo "worktree updated: $old -> $new"
+fi

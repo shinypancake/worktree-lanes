@@ -4,9 +4,30 @@ Per-worktree/lane dev+test isolation CLI for multi-worktree development.
 
 ## Installation
 
+`worktree` is a bash CLI, so it runs on macOS, Linux, and WSL (and Git Bash) — not native
+Windows PowerShell/cmd.
+
+**Any platform (no Homebrew needed):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shinypancake/worktree-lanes/main/install.sh | bash
+```
+
+This clones the repo to `~/.local/share/worktree-lanes` and symlinks the launcher into
+`~/.local/bin` (add that to your `PATH` if it isn't already; the installer prints how). Pin a
+version with `| bash -s -- --version v0.1.8`, or change the target dir with `--bin-dir`.
+
+**macOS / Linux via Homebrew** (optional convenience):
+
 ```bash
 brew install shinypancake/tap/worktree-lanes
 ```
+
+**Update** (for the `curl` install): `worktree self-update`. For Homebrew: `brew upgrade
+shinypancake/tap/worktree-lanes`.
+
+Requires `git` (and `docker`/`docker compose` at runtime; `psql`/`dropdb` for the `db-*`
+commands).
 
 ## Usage
 
@@ -60,6 +81,7 @@ DBs, ports, and Docker Compose project — so worktrees never collide.
 | `worktree validate-parallel` | Spin two throwaway worktrees and assert their databases/ports don't collide. |
 | `worktree db-drop [--dev]` | Drop this worktree's test (and with `--dev`, dev) database. Run before removing a worktree. |
 | `worktree db-prune [--apply] [--dev]` | Drop orphaned `<project>_test_<id>` databases with no live worktree (dry-run by default). |
+| `worktree self-update [--version <tag>]` | Update a `curl`-installed (git-based) checkout in place to the latest release tag (or a pinned one). |
 | `worktree version` | Print the CLI version. |
 
 `db-drop` / `db-prune` need the Postgres client tools (`psql`/`dropdb`) on PATH (`brew install libpq`).
