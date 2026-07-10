@@ -32,7 +32,7 @@ case "$cmd" in
     if [ -f "$WTL_ROOT/VERSION" ]; then cat "$WTL_ROOT/VERSION"; else echo "unknown"; fi
     ;;
   help|-h|--help)
-    echo "usage: worktree <env|test-backend|lane-up|lane-down|...> [args]"
+    echo "usage: worktree <env|test-backend|lane-up|lane-down|db-drop|self-update|...> [args]"
     ;;
   *)
     exe="$WTL_ROOT/libexec/$cmd"
