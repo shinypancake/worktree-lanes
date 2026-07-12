@@ -23,12 +23,33 @@ wtl_id_for_path() {
   printf '%s' "${hash:0:8}"
 }
 
+# wtl_git_retry CMD... — run a read-only git command that can transiently fail
+# under concurrent git activity (index.lock contention when several worktrees
+# or agents touch the repo at once). Retries a few times with a short backoff;
+# prints stdout on the first success. Returns non-zero only if every attempt
+# fails, so callers can surface a clear error instead of an empty value — which
+# otherwise dies three lines later as a cryptic "unbound variable" once the
+# empty `worktree env` output is eval'd by a consumer running under `set -u`.
+wtl_git_retry() {
+  local attempt out
+  for attempt in 1 2 3 4 5; do
+    if out="$("$@" 2>/dev/null)"; then
+      printf '%s' "$out"
+      return 0
+    fi
+    [ "$attempt" -lt 5 ] && sleep 0.2
+  done
+  return 1
+}
+
 wtl_derive() {
   # Allow WTL_FAKE_ROOT to override the worktree root for golden parity tests.
   if [ -n "${WTL_FAKE_ROOT:-}" ]; then
     WTL_WORKTREE_ROOT="$WTL_FAKE_ROOT"
   else
-    WTL_WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)
+    # Retry the toplevel read so a transient git failure doesn't silently fall
+    # back to (a possibly-wrong) pwd; pwd remains the last-resort fallback.
+    WTL_WORKTREE_ROOT="$(wtl_git_retry git rev-parse --show-toplevel || pwd -P)"
   fi
 
   # Allow WTL_FAKE_MAIN_REPO to override the main-repo path for CI portability tests.
@@ -37,7 +58,22 @@ wtl_derive() {
   if [ -n "${WTL_FAKE_MAIN_REPO:-}" ]; then
     WTL_MAIN_REPO="$WTL_FAKE_MAIN_REPO"
   else
-    WTL_MAIN_REPO=$(git worktree list --porcelain | awk '/^worktree/{print $2; exit}')
+    # This shell-out was the single point that, under `set -euo pipefail`, turned
+    # a transient `git worktree list` failure into an empty `worktree env` emit
+    # (pipefail propagates the git failure through the awk pipe) and a cryptic
+    # downstream unbound-variable crash. Retry, then fail LOUDLY with an
+    # actionable message rather than emitting an empty, misleading environment.
+    local _wtl_worktree_list
+    if ! _wtl_worktree_list="$(wtl_git_retry git worktree list --porcelain)"; then
+      printf 'worktree: could not determine the main repo — "git worktree list" failed after retries.\n' >&2
+      printf '  Run inside a git repository, or set WTL_FAKE_MAIN_REPO to the main checkout path.\n' >&2
+      return 1
+    fi
+    WTL_MAIN_REPO="$(printf '%s\n' "$_wtl_worktree_list" | awk '/^worktree/{print $2; exit}')"
+    if [ -z "$WTL_MAIN_REPO" ]; then
+      printf 'worktree: "git worktree list" returned no worktree entry (not inside a git repo?).\n' >&2
+      return 1
+    fi
   fi
   WTL_COMPOSE_FILE="$WTL_MAIN_REPO/docker-compose.yml"
 

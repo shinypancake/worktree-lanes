@@ -78,3 +78,26 @@ setup() {
   # ID must match the stable golden (same as huddle-main: d228c073)
   [ "$WTL_WORKTREE_ID" = "$(wtl_id_for_path "$root")" ]
 }
+
+@test "wtl_git_retry prints stdout and succeeds when the command succeeds" {
+  run wtl_git_retry printf 'hello'
+  [ "$status" -eq 0 ]
+  [ "$output" = "hello" ]
+}
+
+@test "wtl_git_retry returns non-zero after exhausting retries on persistent failure" {
+  run wtl_git_retry false
+  [ "$status" -ne 0 ]
+}
+
+@test "wtl_derive fails loudly (non-zero + message) when the main repo cannot be derived" {
+  # A non-git directory with no WTL_FAKE_MAIN_REPO: `git worktree list` fails, so
+  # derivation must return non-zero with an actionable message rather than emit
+  # an empty environment that later crashes as an unbound variable.
+  local non_git; non_git="$(mktemp -d)"
+  cd "$non_git"
+  unset WTL_FAKE_ROOT WTL_FAKE_MAIN_REPO
+  run wtl_derive
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not determine the main repo"* ]]
+}
