@@ -65,13 +65,13 @@ wtl_derive() {
     # actionable message rather than emitting an empty, misleading environment.
     local _wtl_worktree_list
     if ! _wtl_worktree_list="$(wtl_git_retry git worktree list --porcelain)"; then
-      printf 'worktree: could not determine the main repo — `git worktree list` failed after retries.\n' >&2
+      printf 'worktree: could not determine the main repo — "git worktree list" failed after retries.\n' >&2
       printf '  Run inside a git repository, or set WTL_FAKE_MAIN_REPO to the main checkout path.\n' >&2
       return 1
     fi
     WTL_MAIN_REPO="$(printf '%s\n' "$_wtl_worktree_list" | awk '/^worktree/{print $2; exit}')"
     if [ -z "$WTL_MAIN_REPO" ]; then
-      printf 'worktree: `git worktree list` returned no worktree entry (not inside a git repo?).\n' >&2
+      printf 'worktree: "git worktree list" returned no worktree entry (not inside a git repo?).\n' >&2
       return 1
     fi
   fi
