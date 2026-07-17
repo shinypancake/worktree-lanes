@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+# Durable janitor for the leaks that runner-clean-ci cannot reach.
+#
+# runner-clean-ci reaps by *compose project* (containers/volumes/networks whose
+# project has no running containers). A finished CI/lane run leaves no project
+# to match once its containers are gone, so the *images* it built accumulate
+# forever. This sweep closes that gap. Three phases, all opt-outable, all
+# dry-run by default:
+#
+#   images       remove built lane/CI images (<project>-<name>-<hash>-<service>)
+#                that no container references and that are older than a max age.
+#   build-cache  docker builder prune of cache unused for longer than an age.
+#   stale-lanes  compose-down lanes whose worktree directory no longer exists
+#                (catches a merged ticket's lane that kept running after its
+#                worktree was deleted).
+#
+# Every image/lane removal is gated on a prefix DERIVED FROM CONFIG (WTL_PROJECT),
+# so resources of other projects (locals-*), the shared Docker daemon's home-server
+# stacks (nginx, radarr, ...), and the running active lane are never touched.
+# shellcheck disable=SC1091  # sourced lib files are located at runtime via WTL_ROOT
+
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  dir="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$dir/$SOURCE"
+done
+WTL_LIBEXEC="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+WTL_ROOT="$(cd "$WTL_LIBEXEC/.." && pwd)"
+
+# shellcheck source=../lib/config.sh
+. "$WTL_ROOT/lib/config.sh"
+if ! wtl_load_config 2>/dev/null; then
+  : "${WTL_PROJECT:?runner-reap: WTL_PROJECT not set and no worktree.config found}"
+fi
+WTL_PROJECT="${WTL_CFG_PROJECT:-$WTL_PROJECT}"
+
+# shellcheck source=../lib/derive.sh
+. "$WTL_ROOT/lib/derive.sh"
+# shellcheck source=../lib/emit.sh
+. "$WTL_ROOT/lib/emit.sh"
+wtl_derive
+COMPOSE_FILE="$WTL_COMPOSE_FILE"
+
+APPLY=0
+PREFIX="$WTL_PROJECT"
+MAX_AGE_HOURS=24
+CACHE_AGE="24h"
+ONLY=""
+
+usage() {
+  cat <<EOF
+Usage: worktree runner-reap [--apply] [--only=PHASE] [--prefix=${WTL_PROJECT}]
+                            [--max-age-hours=N] [--cache-age=DURATION]
+
+Durable Docker janitor for a self-hosted CI runner. Reaps the leaks that
+runner-clean-ci cannot: built lane/CI images with no project left to match,
+stale build cache, and lanes still running after their worktree was deleted.
+
+Phases (all run unless --only selects one):
+  images        Remove built images matching <prefix>-<name>-<hash>-<service>
+                that NO container references and that are older than
+                --max-age-hours. The prefix is derived from WTL_PROJECT, so
+                only this project's images are ever eligible.
+  build-cache   docker builder prune of cache unused longer than --cache-age.
+                Docker offers no project filter for build cache; it is pruned
+                purely by age and is regenerable.
+  stale-lanes   Compose-down lanes (<prefix>-<name>-<hash>) whose worktree
+                directory no longer exists. Never touches -main, -shared-infra,
+                CI lanes (-ci-*), or lanes of live worktrees.
+
+Options:
+  --apply             Actually remove. Default is dry-run (prints WOULD lines).
+  --only=PHASE        Run one of: images | build-cache | stale-lanes
+  --prefix=NAME       Image/lane project prefix (default: WTL_PROJECT="${WTL_PROJECT}")
+  --max-age-hours=N   Images younger than N hours are kept (default: 24)
+  --cache-age=DUR     Build cache newer than DUR is kept (default: 24h)
+
+Examples:
+  worktree runner-reap
+  worktree runner-reap --apply
+  worktree runner-reap --apply --only=images --max-age-hours=48
+  worktree runner-reap --apply --only=build-cache --cache-age=48h
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply) APPLY=1 ;;
+    --only=*) ONLY="${1#*=}" ;;
+    --prefix=*) PREFIX="${1#*=}" ;;
+    --max-age-hours=*) MAX_AGE_HOURS="${1#*=}" ;;
+    --cache-age=*) CACHE_AGE="${1#*=}" ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "worktree runner-reap: unknown arg: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+case "$ONLY" in
+  ""|images|build-cache|stale-lanes) ;;
+  *) echo "worktree runner-reap: --only must be images|build-cache|stale-lanes (got: $ONLY)" >&2; exit 1 ;;
+esac
+
+if ! [[ "$MAX_AGE_HOURS" =~ ^[0-9]+$ ]]; then
+  echo "worktree runner-reap: --max-age-hours must be a non-negative integer (got: $MAX_AGE_HOURS)" >&2
+  exit 1
+fi
+
+# Require the docker binary for real runs. Skip the check when inputs are
+# injected (tests exercise the logic without a daemon), mirroring db-prune.
+if [ -z "${WTL_REAP_IMAGE_LIST_CMD:-}${WTL_REAP_PROJECT_LIST_CMD:-}${WTL_REAP_BUILDER_PRUNE_CMD:-}" ] \
+  && ! command -v docker >/dev/null 2>&1; then
+  echo "docker not found" >&2
+  exit 1
+fi
+
+if [ "$APPLY" -eq 1 ]; then MODE=apply; else MODE=dry-run; fi
+
+# An 8-hex worktree/lane id is the trailing segment of every built image repo
+# name and lane compose-project name. Requiring it (rather than a bare prefix
+# match) is what keeps -main and -shared-infra resources out of scope.
+HEX8='[0-9a-f]{8}'
+# Built-image repositories: <prefix>-<worktree-name>-<8hex>-<service>. Matches
+# huddle-ci-<hash>-backend and huddle-<branch>-<hash>-sidekiq alike; does NOT
+# match huddle-main-backend (no hash) or huddle-shared-infra-postgres.
+IMAGE_RE="^${PREFIX}-.+-${HEX8}-[a-z0-9][a-z0-9-]*$"
+# Lane compose projects: <prefix>-<worktree-name>-<8hex>.
+LANE_PROJECT_RE="^${PREFIX}-.+-${HEX8}$"
+
+# ---------------------------------------------------------------------------
+# Injectable inputs/actions (default to docker; overridden by tests).
+# ---------------------------------------------------------------------------
+
+# Emit one line per image tag: <full-id>\t<repo:tag>\t<created-epoch>\t<size-bytes>
+_reap_list_images() {
+  if [ -n "${WTL_REAP_IMAGE_LIST_CMD:-}" ]; then eval "$WTL_REAP_IMAGE_LIST_CMD"; return; fi
+  local ids
+  ids=$(docker images -q --no-trunc 2>/dev/null | sort -u) || return 0
+  [ -n "$ids" ] || return 0
+  # One inspect for all images; expand RepoTags so multi-tagged images emit a
+  # line per tag. Created is RFC3339 (date -d parses it; the CreatedAt column
+  # from `docker images` carries a tz abbrev like PDT that date -d rejects).
+  # shellcheck disable=SC2086
+  docker image inspect \
+    --format '{{$id:=.Id}}{{$e:=.Created}}{{$s:=.Size}}{{range .RepoTags}}{{$id}}	{{.}}	{{$e}}	{{$s}}
+{{end}}' $ids 2>/dev/null \
+  | while IFS=$'\t' read -r id tag created bytes; do
+      [ -n "$tag" ] || continue
+      local epoch
+      epoch=$(date -d "$created" +%s 2>/dev/null || echo 0)
+      printf '%s\t%s\t%s\t%s\n' "$id" "$tag" "$epoch" "$bytes"
+    done
+}
+
+# Emit the full image id referenced by every container, running or stopped.
+_reap_referenced_ids() {
+  if [ -n "${WTL_REAP_REFERENCED_IDS_CMD:-}" ]; then eval "$WTL_REAP_REFERENCED_IDS_CMD"; return; fi
+  local cids
+  cids=$(docker ps -aq 2>/dev/null) || return 0
+  [ -n "$cids" ] || return 0
+  # shellcheck disable=SC2086
+  docker inspect --format '{{.Image}}' $cids 2>/dev/null || true
+}
+
+# Emit one compose-project name per line (from container/volume/network labels).
+_reap_list_projects() {
+  if [ -n "${WTL_REAP_PROJECT_LIST_CMD:-}" ]; then eval "$WTL_REAP_PROJECT_LIST_CMD"; return; fi
+  {
+    docker ps -a --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null || true
+    docker volume ls --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null || true
+    docker network ls --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null || true
+  } | awk 'NF' | sort -u
+}
+
+# Emit one absolute worktree path per line for every live worktree.
+_reap_live_worktree_paths() {
+  if [ -n "${WTL_REAP_WORKTREE_LIST_CMD:-}" ]; then eval "$WTL_REAP_WORKTREE_LIST_CMD"; return; fi
+  local line
+  while IFS= read -r line; do
+    [[ "$line" == worktree\ * ]] && printf '%s\n' "${line#worktree }"
+  done < <(git -C "$WTL_MAIN_REPO" worktree list --porcelain 2>/dev/null)
+}
+
+_reap_rmi() {
+  if [ -n "${WTL_REAP_RMI_CMD:-}" ]; then eval "$WTL_REAP_RMI_CMD \"\$1\""; return; fi
+  docker rmi "$1" >/dev/null 2>&1
+}
+
+_reap_compose_down() {
+  if [ -n "${WTL_REAP_DOWN_CMD:-}" ]; then eval "$WTL_REAP_DOWN_CMD \"\$1\""; return; fi
+  docker compose -p "$1" -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1
+}
+
+_reap_builder_prune() {
+  if [ -n "${WTL_REAP_BUILDER_PRUNE_CMD:-}" ]; then eval "$WTL_REAP_BUILDER_PRUNE_CMD \"\$1\""; return; fi
+  docker builder prune -f --filter "until=$1"
+}
+
+_humanize_bytes() {
+  local b="$1"
+  if [ "$b" -ge 1073741824 ]; then awk -v b="$b" 'BEGIN{printf "%.2fGB", b/1073741824}'
+  elif [ "$b" -ge 1048576 ]; then awk -v b="$b" 'BEGIN{printf "%.1fMB", b/1048576}'
+  else awk -v b="$b" 'BEGIN{printf "%.0fKB", b/1024}'; fi
+}
+
+# ---------------------------------------------------------------------------
+# Phase: images
+# ---------------------------------------------------------------------------
+phase_images() {
+  echo "== images (prefix=${PREFIX}, max-age=${MAX_AGE_HOURS}h) =="
+  local now cutoff
+  now=$(date +%s)
+  cutoff=$(( now - MAX_AGE_HOURS * 3600 ))
+
+  local referenced
+  referenced="$(_reap_referenced_ids)"
+
+  local removed=0 kept_ref=0 kept_young=0 total_bytes=0 failed=0
+
+  while IFS=$'\t' read -r id tag epoch bytes; do
+    [ -n "$tag" ] || continue
+    local repo="${tag%:*}"
+    [[ "$repo" =~ $IMAGE_RE ]] || continue
+
+    if [ -n "$referenced" ] && printf '%s\n' "$referenced" | grep -qxF "$id"; then
+      echo "KEEP  $tag (referenced by a container)"
+      kept_ref=$((kept_ref + 1))
+      continue
+    fi
+
+    if [ "$epoch" -gt "$cutoff" ]; then
+      echo "KEEP  $tag (younger than ${MAX_AGE_HOURS}h)"
+      kept_young=$((kept_young + 1))
+      continue
+    fi
+
+    total_bytes=$(( total_bytes + bytes ))
+    if [ "$APPLY" -eq 1 ]; then
+      if _reap_rmi "$tag"; then
+        echo "REMOVE $tag ($(_humanize_bytes "$bytes"))"
+        removed=$((removed + 1))
+      else
+        echo "FAIL   $tag" >&2
+        failed=$((failed + 1))
+      fi
+    else
+      echo "WOULD REMOVE $tag ($(_humanize_bytes "$bytes"))"
+      removed=$((removed + 1))
+    fi
+  done < <(_reap_list_images)
+
+  echo "  images_removed:  $removed"
+  echo "  kept_referenced: $kept_ref"
+  echo "  kept_young:      $kept_young"
+  echo "  reclaim_estimate: $(_humanize_bytes "$total_bytes") (upper bound; layers may be shared)"
+  [ "$failed" -eq 0 ] || return 1
+}
+
+# ---------------------------------------------------------------------------
+# Phase: build-cache
+# ---------------------------------------------------------------------------
+phase_build_cache() {
+  echo "== build-cache (until=${CACHE_AGE}) =="
+  if [ "$APPLY" -eq 1 ]; then
+    _reap_builder_prune "$CACHE_AGE"
+  else
+    echo "WOULD RUN docker builder prune -f --filter until=${CACHE_AGE}"
+    docker system df 2>/dev/null | awk '/Build Cache/{print "  current build cache: "$0}'
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Phase: stale-lanes
+# ---------------------------------------------------------------------------
+phase_stale_lanes() {
+  echo "== stale-lanes (prefix=${PREFIX}) =="
+
+  # Live worktree ids: sha256(path)[0:8] for each live worktree, same identity
+  # scheme derive.sh uses to build the lane compose-project name.
+  local live_ids path
+  live_ids=""
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    live_ids="${live_ids}$(wtl_id_for_path "$path")"$'\n'
+  done < <(_reap_live_worktree_paths)
+
+  local torn=0 kept=0 failed=0
+  while IFS= read -r project; do
+    [ -n "$project" ] || continue
+    # CI lanes are managed by runner-clean-ci (with start-lock coordination);
+    # their id is not a worktree path hash, so never infer staleness for them.
+    [[ "$project" == "${PREFIX}-ci-"* ]] && continue
+    [[ "$project" =~ $LANE_PROJECT_RE ]] || continue
+
+    local id="${project##*-}"
+    [[ "$id" =~ ^${HEX8}$ ]] || continue
+
+    if printf '%s' "$live_ids" | grep -qxF "$id"; then
+      kept=$((kept + 1))
+      continue
+    fi
+
+    if [ "$APPLY" -eq 1 ]; then
+      if _reap_compose_down "$project"; then
+        echo "TEARDOWN $project (worktree gone)"
+        torn=$((torn + 1))
+      else
+        echo "FAIL     $project" >&2
+        failed=$((failed + 1))
+      fi
+    else
+      echo "WOULD TEARDOWN $project (worktree gone)"
+      torn=$((torn + 1))
+    fi
+  done < <(_reap_list_projects)
+
+  echo "  lanes_torn_down: $torn"
+  echo "  lanes_kept_live: $kept"
+  [ "$failed" -eq 0 ] || return 1
+}
+
+echo "Compose file: $COMPOSE_FILE"
+echo "Mode: $MODE"
+echo
+
+rc=0
+if [ -z "$ONLY" ] || [ "$ONLY" = images ]; then phase_images || rc=1; echo; fi
+if [ -z "$ONLY" ] || [ "$ONLY" = build-cache ]; then phase_build_cache || rc=1; echo; fi
+if [ -z "$ONLY" ] || [ "$ONLY" = stale-lanes ]; then phase_stale_lanes || rc=1; echo; fi
+
+exit "$rc"
