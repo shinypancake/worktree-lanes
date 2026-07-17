@@ -62,6 +62,12 @@ inject_images() {
   [ "$status" -ne 0 ]
 }
 
+@test "runner-reap rejects an empty --prefix (would widen the allow-list to every project)" {
+  run REAP --only=images --prefix=
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--prefix must not be empty"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # images phase
 # ---------------------------------------------------------------------------
@@ -129,6 +135,33 @@ inject_images() {
   [[ "$output" != *"huddle-ci-deadbeef-backend"* ]]
 }
 
+@test "images fails CLOSED when container enumeration fails: phase skipped, nothing eligible, exit non-zero" {
+  inject_images
+  # Simulate a docker ps flake: enumeration returns failure (distinct from
+  # "zero containers", which is success with empty output).
+  export WTL_REAP_REFERENCED_IDS_CMD="false"
+  export WTL_REAP_RMI_CMD="echo RMI-CALLED:"
+  run REAP --apply --only=images
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"skipping images phase"* ]]
+  [[ "$output" != *"REMOVE"* ]]
+  [[ "$output" != *"RMI-CALLED:"* ]]
+}
+
+@test "images: an rmi refusal (real docker rmi without -f refuses referenced images) is reported as FAIL, not counted removed" {
+  # If the referenced-set under-reports (e.g. a container created between
+  # enumeration and removal), the last line of defense is that _reap_rmi uses
+  # `docker rmi` WITHOUT -f, which refuses to delete a referenced image. This
+  # test documents that a refusal surfaces as FAIL + non-zero exit.
+  inject_images
+  export WTL_REAP_REFERENCED_IDS_CMD="printf ''"
+  export WTL_REAP_RMI_CMD="false"
+  run REAP --apply --only=images
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FAIL   huddle-ci-deadbeef-backend:latest"* ]]
+  [[ "$output" == *"images_removed:  0"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # stale-lanes phase
 # ---------------------------------------------------------------------------
@@ -165,6 +198,30 @@ inject_lanes() {
   [[ "$output" != *"TEARDOWN huddle-shared-infra"* ]]
   [[ "$output" != *"TEARDOWN locals-main-orphan-cafef00d"* ]]
   [[ "$output" == *"lanes_kept_live: 1"* ]]
+}
+
+@test "stale-lanes fails CLOSED when the live-worktree list is EMPTY: no lane torn down, exit non-zero" {
+  inject_lanes
+  # A healthy `git worktree list` always includes the main repo, so an empty
+  # result is a flake — it must never read as "every lane is stale".
+  export WTL_REAP_WORKTREE_LIST_CMD="printf ''"
+  export WTL_REAP_DOWN_CMD="echo DOWN-CALLED:"
+  run REAP --apply --only=stale-lanes
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"skipping stale-lanes phase"* ]]
+  [[ "$output" != *"TEARDOWN"* ]]
+  [[ "$output" != *"DOWN-CALLED:"* ]]
+}
+
+@test "stale-lanes fails CLOSED when the live-worktree enumeration FAILS: no lane torn down, exit non-zero" {
+  inject_lanes
+  export WTL_REAP_WORKTREE_LIST_CMD="false"
+  export WTL_REAP_DOWN_CMD="echo DOWN-CALLED:"
+  run REAP --apply --only=stale-lanes
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"skipping stale-lanes phase"* ]]
+  [[ "$output" != *"TEARDOWN"* ]]
+  [[ "$output" != *"DOWN-CALLED:"* ]]
 }
 
 @test "stale-lanes --apply tears down ONLY the orphan via compose down" {

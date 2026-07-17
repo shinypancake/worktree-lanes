@@ -109,6 +109,13 @@ if ! [[ "$MAX_AGE_HOURS" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
+# An empty prefix would degrade the allow-list regexes to ^-.+-<hash>...,
+# widening eligibility to every project on the shared daemon.
+if [ -z "$PREFIX" ]; then
+  echo "worktree runner-reap: --prefix must not be empty" >&2
+  exit 1
+fi
+
 # Require the docker binary for real runs. Skip the check when inputs are
 # injected (tests exercise the logic without a daemon), mirroring db-prune.
 if [ -z "${WTL_REAP_IMAGE_LIST_CMD:-}${WTL_REAP_PROJECT_LIST_CMD:-}${WTL_REAP_BUILDER_PRUNE_CMD:-}" ] \
@@ -149,18 +156,29 @@ _reap_list_images() {
 {{end}}' $ids 2>/dev/null \
   | while IFS=$'\t' read -r id tag created bytes; do
       [ -n "$tag" ] || continue
+      # Fail closed on an unparseable timestamp: an unknown age must read as
+      # KEEP, never as "ancient, eligible for removal".
       local epoch
-      epoch=$(date -d "$created" +%s 2>/dev/null || echo 0)
+      if ! epoch=$(date -d "$created" +%s 2>/dev/null); then
+        echo "WARN  images: cannot parse Created time '$created' for $tag; keeping it" >&2
+        continue
+      fi
       printf '%s\t%s\t%s\t%s\n' "$id" "$tag" "$epoch" "$bytes"
     done
 }
 
 # Emit the full image id referenced by every container, running or stopped.
+# Distinguishes "zero containers" (success, empty output) from "docker ps
+# failed" (non-zero return) so the caller can fail closed on a daemon flake
+# instead of treating every image as unreferenced.
 _reap_referenced_ids() {
   if [ -n "${WTL_REAP_REFERENCED_IDS_CMD:-}" ]; then eval "$WTL_REAP_REFERENCED_IDS_CMD"; return; fi
   local cids
-  cids=$(docker ps -aq 2>/dev/null) || return 0
+  cids=$(docker ps -aq 2>/dev/null) || return 1
   [ -n "$cids" ] || return 0
+  # Best-effort: a container removed between ps and inspect makes inspect exit
+  # non-zero while still printing the rest; its image is no longer referenced,
+  # and rmi-without--f refuses any referenced image this misses.
   # shellcheck disable=SC2086
   docker inspect --format '{{.Image}}' $cids 2>/dev/null || true
 }
@@ -176,12 +194,17 @@ _reap_list_projects() {
 }
 
 # Emit one absolute worktree path per line for every live worktree.
+# Retried (wtl_git_retry, from lib/derive.sh) because `git worktree list`
+# flakes under index.lock contention on a busy runner — the exact failure
+# derive.sh hardens against. Returns non-zero if every attempt fails so the
+# caller can fail closed instead of reading "no live worktrees".
 _reap_live_worktree_paths() {
   if [ -n "${WTL_REAP_WORKTREE_LIST_CMD:-}" ]; then eval "$WTL_REAP_WORKTREE_LIST_CMD"; return; fi
-  local line
+  local list line
+  list="$(wtl_git_retry git -C "$WTL_MAIN_REPO" worktree list --porcelain)" || return 1
   while IFS= read -r line; do
     [[ "$line" == worktree\ * ]] && printf '%s\n' "${line#worktree }"
-  done < <(git -C "$WTL_MAIN_REPO" worktree list --porcelain 2>/dev/null)
+  done <<< "$list"
 }
 
 _reap_rmi() {
@@ -215,8 +238,14 @@ phase_images() {
   now=$(date +%s)
   cutoff=$(( now - MAX_AGE_HOURS * 3600 ))
 
+  # Fail closed: if the container enumeration itself failed, every image would
+  # look unreferenced and proceed to removal. rmi-without--f would still refuse
+  # referenced ones, but a flake must never be the thing that decides.
   local referenced
-  referenced="$(_reap_referenced_ids)"
+  if ! referenced="$(_reap_referenced_ids)"; then
+    echo "WARN  images: container enumeration failed (docker ps); skipping images phase — cannot tell referenced from orphaned" >&2
+    return 1
+  fi
 
   local removed=0 kept_ref=0 kept_young=0 total_bytes=0 failed=0
 
@@ -278,6 +307,17 @@ phase_build_cache() {
 phase_stale_lanes() {
   echo "== stale-lanes (prefix=${PREFIX}) =="
 
+  # Fail closed: staleness is inferred from a lane id's ABSENCE from the live
+  # set, so an empty/failed enumeration would classify every live lane —
+  # including one running a CI job right now — as stale and compose-down it.
+  # A healthy `git worktree list` always includes at least the main repo, so
+  # an empty result is a flake, never "no worktrees". Skip the phase loudly.
+  local worktree_paths
+  if ! worktree_paths="$(_reap_live_worktree_paths)" || [ -z "$worktree_paths" ]; then
+    echo "WARN  stale-lanes: live-worktree enumeration failed or came back empty; skipping stale-lanes phase — absence of evidence is not staleness" >&2
+    return 1
+  fi
+
   # Live worktree ids: sha256(path)[0:8] for each live worktree, same identity
   # scheme derive.sh uses to build the lane compose-project name.
   local live_ids path
@@ -285,7 +325,7 @@ phase_stale_lanes() {
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     live_ids="${live_ids}$(wtl_id_for_path "$path")"$'\n'
-  done < <(_reap_live_worktree_paths)
+  done <<< "$worktree_paths"
 
   local torn=0 kept=0 failed=0
   while IFS= read -r project; do
