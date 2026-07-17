@@ -165,6 +165,10 @@ _reap_list_images() {
       fi
       printf '%s\t%s\t%s\t%s\n' "$id" "$tag" "$epoch" "$bytes"
     done
+  # Explicit success: don't let the parse loop's last body status become the
+  # function's (the bug _reap_live_worktree_paths had). Callers currently
+  # ignore this status, but the shape must not be one refactor from fail-open.
+  return 0
 }
 
 # Emit the full image id referenced by every container, running or stopped.
@@ -205,6 +209,10 @@ _reap_live_worktree_paths() {
   while IFS= read -r line; do
     [[ "$line" == worktree\ * ]] && printf '%s\n' "${line#worktree }"
   done <<< "$list"
+  # Explicit success: porcelain output never ends with a `worktree ` line, so
+  # the loop's final body execution is a failed [[ ]] && — without this, that
+  # status leaks out as the function's and the caller fail-closes every run.
+  return 0
 }
 
 _reap_rmi() {
