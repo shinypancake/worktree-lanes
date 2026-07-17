@@ -235,6 +235,31 @@ inject_lanes() {
   [[ "$output" != *"DOWN-CALLED: locals-main"* ]]
 }
 
+@test "stale-lanes DEFAULT path parses real porcelain via git (no injection): exit 0, live kept, orphan torn" {
+  # Regression: the porcelain parse loop's final body execution is a failed
+  # [[ ]] && (output never ends with a 'worktree ' line), which leaked out as
+  # the function's exit status and made every real run fail closed. This test
+  # PATH-shims git so the DEFAULT parse loop executes — the injected
+  # WTL_REAP_WORKTREE_LIST_CMD shortcut bypassed it and hid the bug.
+  LIVE_ID="$(
+    . "$BATS_TEST_DIRNAME/../lib/derive.sh"
+    wtl_id_for_path "$TEST_ROOT/live-worktree"
+  )"
+  fake_bin="$(mktemp -d)"
+  cat > "$fake_bin/git" <<EOF
+#!/usr/bin/env bash
+printf 'worktree %s\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n\nworktree %s\nHEAD 2222222222222222222222222222222222222222\nbranch refs/heads/feat\n' '$TEST_ROOT' '$TEST_ROOT/live-worktree'
+EOF
+  chmod +x "$fake_bin/git"
+  export WTL_REAP_PROJECT_LIST_CMD="printf '%s\n' 'huddle-gone-lane-deadbeef' 'huddle-live-lane-${LIVE_ID}'"
+  run env PATH="$fake_bin:$PATH" bash "$BATS_TEST_DIRNAME/../libexec/runner-reap" --only=stale-lanes
+  rm -rf "$fake_bin"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"skipping stale-lanes phase"* ]]
+  [[ "$output" == *"WOULD TEARDOWN huddle-gone-lane-deadbeef"* ]]
+  [[ "$output" == *"lanes_kept_live: 1"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # build-cache phase
 # ---------------------------------------------------------------------------
