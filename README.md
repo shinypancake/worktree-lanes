@@ -81,6 +81,8 @@ DBs, ports, and Docker Compose project — so worktrees never collide.
 | `worktree validate-parallel` | Spin two throwaway worktrees and assert their databases/ports don't collide. |
 | `worktree db-drop [--dev]` | Drop this worktree's test (and with `--dev`, dev) database. Run before removing a worktree. |
 | `worktree db-prune [--apply] [--dev]` | Drop orphaned `<project>_test_<id>` databases with no live worktree (dry-run by default). |
+| `worktree runner-clean-ci [--apply] [--include-running] [--max-age=MIN]` | Reap leaked CI/lane Compose **projects** (containers/volumes/networks) with no running containers (dry-run by default). |
+| `worktree runner-reap [--apply] [--only=PHASE] [--max-age-hours=N] [--cache-age=DUR]` | Durable runner janitor for what `runner-clean-ci` can't reach: built `<project>-…-<hash>-<service>` **images** no container references and older than max-age, aged build cache, and lanes still running after their worktree was deleted. Prefix-scoped to `WTL_PROJECT`; dry-run by default. |
 | `worktree self-update [--version <tag>]` | Update a `curl`-installed (git-based) checkout in place to the latest release tag (or a pinned one). |
 | `worktree version` | Print the CLI version. |
 
